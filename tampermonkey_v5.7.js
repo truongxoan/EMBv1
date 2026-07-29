@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Ai Là Vua Lì Đòn (Clipboard Bridge + HTTP/WS)
+// @name         Ai Là Vua Lì Đòn (EMB V5.7)
 // @namespace    http://tampermonkey.net/
 // @version      5.7
-// @description  3 chế độ gửi dữ liệu: 1) Clipboard (không cần host) 2) WebSocket 3) HTTP. Tự động chọn kênh tốt nhất.
+// @description  3 chế độ gửi dữ liệu: 1) Clipboard (không cần host) 2) WebSocket 3) HTTP. Tự động chọn kênh tốt nhất. Tự động tìm & tải ảnh.
 // @author       Antigravity
-// @match        https://portal.godgroup.com/design/manual-embroidery*
+// @match        https://portal.godgroup.com/design/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -28,7 +28,7 @@
 
     // ── STATE ─────────────────────────────────────────────────────────────────
     let host      = GM_getValue(STORAGE_HOST, DEFAULT_HOST).replace(/\/+$/, '');
-    let mode      = GM_getValue(STORAGE_MODE, 'clipboard'); // default: hostless
+    let mode      = GM_getValue(STORAGE_MODE, 'websocket'); // default: websocket
     let enabled   = GM_getValue(STORAGE_ON, true);
     let sentCount = 0;
     let pingTimer = null;
@@ -254,6 +254,73 @@
         if (on) { hostInput.value = host; hostInput.focus(); hostInput.select(); }
     }
 
+    // Find the design preview image URL on the page
+    function findImageUrl(row) {
+        // 1. Try to find img with alt="Artwork" in the row or document
+        let imgEl = null;
+        if (row) {
+            imgEl = row.querySelector('img[alt="Artwork"]');
+        }
+        if (!imgEl) {
+            imgEl = document.querySelector('img[alt="Artwork"]');
+        }
+        if (!imgEl && row) {
+            imgEl = row.querySelector('img');
+        }
+        if (!imgEl) {
+            imgEl = document.querySelector('img[src*="designs/"], img[src*="manual"], img.design-preview');
+        }
+        
+        if (imgEl && imgEl.src) {
+            let src = imgEl.src;
+            try {
+                // If it's a resize service URL, extract the actual full resolution URL
+                if (src.includes('url=')) {
+                    const urlObj = new URL(src);
+                    const actualUrl = urlObj.searchParams.get('url');
+                    if (actualUrl) {
+                        return decodeURIComponent(actualUrl);
+                    }
+                }
+            } catch(e) {
+                console.error("Error parsing image URL:", e);
+            }
+            return src;
+        }
+
+        // 2. Check if there is an <a> link with text "Download Image"
+        const clickables = Array.from(document.querySelectorAll('button, a, .text-blue'));
+        for (const el of clickables) {
+            const txt = el.textContent.trim().toLowerCase();
+            if (txt === "download image" || txt.includes("download image")) {
+                if (el.tagName === 'A' && el.href) {
+                    return el.href;
+                }
+            }
+        }
+        
+        return '';
+    }
+
+    // Direct browser download simulation
+    function triggerBrowserDownload(url, filename) {
+        console.log("[TM] Triggering browser Blob download for:", url);
+        fetch(url)
+            .then(response => response.blob())
+            .then(blob => {
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            })
+            .catch(err => {
+                console.error("[TM] Direct download failed, opening in new tab:", err);
+                window.open(url, '_blank');
+            });
+    }
+
     // ── WebSocket ─────────────────────────────────────────────────────────────
     function connectWS(url) {
         if (ws) { try { ws.close(); } catch(e){} }
@@ -264,6 +331,32 @@
                 try {
                     const d = JSON.parse(e.data);
                     if (d.name) applyConnState('ok', d.name+(d.version?' v'+d.version:''), null);
+                    
+                    if (d.action === "download_image") {
+                        console.log("[WS] Received download_image command from TX App");
+                        const clickables = Array.from(document.querySelectorAll('button, a, .text-blue'));
+                        let found = false;
+                        for (const el of clickables) {
+                            const txt = el.textContent.trim().toLowerCase();
+                            if (txt === "download image" || txt.includes("download image")) {
+                                console.log("[WS] Simulating click on:", el);
+                                el.click();
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            console.warn("[WS] Could not find any button/link with text 'Download Image'. Trying to find image element...");
+                            const imgUrl = findImageUrl(null);
+                            if (imgUrl) {
+                                console.log("[WS] Found image URL, triggering download:", imgUrl);
+                                triggerBrowserDownload(imgUrl, "1.png");
+                                found = true;
+                            } else {
+                                console.error("[WS] No image URL found on page.");
+                            }
+                        }
+                    }
                 } catch(err){}
             };
             ws.onclose = () => { wsConn = false; };
@@ -349,9 +442,14 @@
         const orig = {t:btn.innerText, bg:btn.style.background, c:btn.style.color};
         btn.innerText = '…'; btn.style.background = '#ff9900'; btn.style.color = '#000';
 
+        const imageUrl = findImageUrl(row);
+
         const payload = {
-            source_url: location.href, title: document.title,
-            html_fragments: [row.outerHTML], full_text: row.innerText
+            source_url: location.href,
+            title: document.title,
+            html_fragments: [row.outerHTML],
+            full_text: row.innerText,
+            image_url: imageUrl
         };
 
         // ── Mode: Clipboard (hostless) ────────────────────────────────────────

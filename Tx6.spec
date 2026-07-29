@@ -4,13 +4,16 @@ import os
 PATCH_PRINT_EXE = os.path.abspath('A-PatchPrint.exe')
 PS_AUTO_EXE     = os.path.abspath('PS_Auto_GUI1.exe')
 
+binaries = []
+if os.path.exists(PATCH_PRINT_EXE):
+    binaries.append((PATCH_PRINT_EXE, 'tools'))
+if os.path.exists(PS_AUTO_EXE):
+    binaries.append((PS_AUTO_EXE, 'tools'))
+
 a = Analysis(
     ['app.py'],
     pathex=[os.path.abspath('.')],
-    binaries=[
-        (PATCH_PRINT_EXE, 'tools'),
-        (PS_AUTO_EXE,     'tools'),
-    ],
+    binaries=binaries,
     datas=[
         ('app_icon.png', '.'),
         ('Xổ Số.mp3', '.'),
@@ -24,6 +27,7 @@ a = Analysis(
         ('clipboard_bridge.py', '.'),
         ('auto_workflow.py', '.'),
         ('ui_components.py', '.'),
+        ('order_db.py', '.'),
     ],
     hiddenimports=[
         'flask', 'flask.json', 'flask.wrappers', 'flask.cli',
@@ -41,9 +45,9 @@ a = Analysis(
         'cv2', 'bs4', 'yt_dlp',
         'win32gui', 'win32con', 'win32process', 'win32api', 'winreg',
         'winsound', 'ctypes', 'ctypes.wintypes',
-        'json', 'hashlib', 'datetime', 'traceback', 'importlib',
+        'json', 'hashlib', 'datetime', 'traceback', 'importlib', 'sqlite3',
         'tai_xiu_game', 'tx_network', 'gui', 'logic', 'security',
-        'server', 'color_reader', 'auto_workflow', 'ui_components',
+        'server', 'color_reader', 'auto_workflow', 'ui_components', 'order_db',
     ],
     hookspath=[],
     hooksconfig={},

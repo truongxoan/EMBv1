@@ -27,7 +27,7 @@ class ClipboardBridge(QObject):
         self._last_text = ""
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
-        self._timer.timeout.connect(self._poll)
+        self._timer.timeout.connect(self._poll_safe)  # Use safe wrapper
         self._clipboard = QApplication.clipboard()
 
     def start(self):
@@ -54,7 +54,10 @@ class ClipboardBridge(QObject):
         try:
             data = json.loads(payload_str)
         except json.JSONDecodeError:
-            print(f"[ClipBoard] Bad JSON in clipboard: {payload_str[:80]}")
+            try:
+                print(f"[ClipBoard] Bad JSON in clipboard: {payload_str[:80]}")
+            except Exception:
+                print("[ClipBoard] Bad JSON in clipboard (unprintable)")
             return
 
         if not isinstance(data, dict):
@@ -63,8 +66,27 @@ class ClipboardBridge(QObject):
             print("[ClipBoard] Ping received via clipboard")
             return
 
-        print(f"[ClipBoard] Data received: {str(data)[:120]}...")
+        # Safe print: avoid OSError on Windows console with bad chars in scraped data
+        try:
+            preview = str(data)[:120]
+            print(f"[ClipBoard] Data received: {preview}...")
+        except Exception:
+            try:
+                print("[ClipBoard] Data received (preview unavailable, keys: {})".format(list(data.keys())[:5]))
+            except Exception:
+                print("[ClipBoard] Data received (unprintable)")
+
         # Clear clipboard so we don't re-process on next poll
         self._clipboard.clear(QClipboard.Clipboard)
         self._last_text = ""
         self.data_received.emit(data)
+
+    def _poll_safe(self):
+        """Wrapper so any unexpected error in polling never crashes the bridge."""
+        try:
+            self._poll()
+        except Exception as e:
+            try:
+                print(f"[ClipBoard] _poll error (suppressed): {e}")
+            except Exception:
+                pass

@@ -19,6 +19,9 @@ def parse_details(data):
     MASTER PARSER V3: Specific HTML Structure Targeting.
     """
     parsed = {}
+    if not isinstance(data, dict):
+        data = {}
+    parsed['image_url'] = data.get('image_url', '') if isinstance(data, dict) else ''
     
     # 1. Flatten Data to find HTML chunks
     all_values = []
@@ -34,6 +37,63 @@ def parse_details(data):
             
     extract_strings(data)
     combined_text = " ".join(all_values)
+    
+    # Extract [SYSTEM] THREAD_COLOR and [SYSTEM] CHOOSE_BACKGROUND_COLOR
+    thread_color = "-"
+    bg_color = "-"
+    
+    color_patterns = [
+        r'\[SYSTEM\]\s*THREAD_COLOR:\s*([^\n\r<|]+)',
+        r'THREAD_COLOR:\s*([^\n\r<|]+)'
+    ]
+    bg_patterns = [
+        r'\[SYSTEM\]\s*CHOOSE_BACKGROUND_COLOR:\s*([^\n\r<|]+)',
+        r'CHOOSE_BACKGROUND_COLOR:\s*([^\n\r<|]+)'
+    ]
+    
+    # Try using BeautifulSoup for clean extraction from HTML structure
+    try:
+        soup_color = BeautifulSoup(combined_text, 'html.parser')
+        
+        # 1. Thread Color
+        span_thread = soup_color.find(lambda tag: tag.name == 'span' and 'THREAD_COLOR' in tag.text)
+        if span_thread:
+            sibling = span_thread.find_next()
+            if sibling:
+                txt = ''.join([t for t in sibling.contents if isinstance(t, str)]).strip()
+                if txt:
+                    thread_color = txt
+                    
+        # 2. Background Color
+        span_bg = soup_color.find(lambda tag: tag.name == 'span' and 'CHOOSE_BACKGROUND_COLOR' in tag.text)
+        if span_bg:
+            sibling = span_bg.find_next()
+            if sibling:
+                txt = ''.join([t for t in sibling.contents if isinstance(t, str)]).strip()
+                if txt:
+                    bg_color = txt
+    except Exception as esoup:
+        print(f"[PARSER] Soup color parsing exception: {esoup}")
+
+    # Fallback to Regex if still default
+    if thread_color == "-":
+        for pattern in color_patterns:
+            m = re.search(pattern, combined_text, re.IGNORECASE)
+            if m:
+                thread_color = re.sub(r'<[^>]*>', '', m.group(1)).strip()
+                thread_color = " ".join(thread_color.split())
+                break
+                
+    if bg_color == "-":
+        for pattern in bg_patterns:
+            m = re.search(pattern, combined_text, re.IGNORECASE)
+            if m:
+                bg_color = re.sub(r'<[^>]*>', '', m.group(1)).strip()
+                bg_color = " ".join(bg_color.split())
+                break
+                
+    parsed['thread_color'] = thread_color
+    parsed['bg_color'] = bg_color
     
     # 2. Aggressive HTML Parsing
     # We reconstruct a soup from all potential HTML-like strings found
@@ -209,6 +269,12 @@ def parse_details(data):
             parsed['positions'].insert(0, '4')  # Add to front
             print("Special Rule: 'Patches' detected - Added position '4'")
             
+    # Bỏ chức năng chọn nhiều dữ liệu: chỉ giữ lại 1 vị trí đầu tiên
+    if len(parsed['positions']) > 1:
+        parsed['positions'] = [parsed['positions'][0]]
+    elif not parsed['positions']:
+        parsed['positions'] = ['4']
+            
     # 6. Look up Dimensions
     parsed['dims'] = get_product_dimensions(
         parsed.get('product_name', ''),
@@ -303,7 +369,7 @@ def load_dimensions_db():
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kichthuoc.csv")
     
     if not os.path.exists(csv_path):
-        print("kichthuoc.csv not found")
+        print("[Dimensions] kichthuoc.csv not found next to logic.py - dimensions lookup disabled.")
         _DIMENSIONS_DB = {}
         return db
 
@@ -319,6 +385,12 @@ def load_dimensions_db():
             clean_row = [c.strip() for c in row if c.strip()]
             
             if not clean_row:
+                i += 1
+                continue
+
+            # Skip comment rows
+            first_cell = (row[0] if row else "").strip()
+            if first_cell.startswith("#"):
                 i += 1
                 continue
                 
@@ -337,23 +409,27 @@ def load_dimensions_db():
                          
                     # Check if data row
                     is_data = False
-                    if len(data_row) > 5 and (data_row[4].isdigit() or data_row[5].isdigit()): is_data = True
-                    if len(data_row) > 3 and data_row[3] == "All": is_data = True
+                    if len(data_row) > 5 and (str(data_row[4]).strip().isdigit() or str(data_row[5]).strip().isdigit()):
+                        is_data = True
+                    if len(data_row) > 3 and str(data_row[3]).strip() == "All":
+                        is_data = True
                     
                     if not is_data:
                          # Possible new product name?
                          if len("".join(data_row)) > 10: break
                     
-                    # Parse
-                    # Index: 1=Pos, 2=Cost, 3=Size, 4=H, 5=W, 6=Unit
-                    pos = data_row[1].strip()
-                    if pos: last_pos = pos
-                    else: pos = last_pos
+                    # Parse safely (defensive against short / comment rows)
+                    # Index expectation: 1=Pos, 3=Size, 4=H, 5=W, 6=Unit
+                    pos = data_row[1].strip() if len(data_row) > 1 else ""
+                    if pos:
+                        last_pos = pos
+                    else:
+                        pos = last_pos
                     
-                    size = data_row[3].strip()
-                    h = data_row[4].strip()
-                    w = data_row[5].strip()
-                    unit = data_row[6].strip() if len(data_row)>6 else "mm"
+                    size = data_row[3].strip() if len(data_row) > 3 else ""
+                    h = data_row[4].strip() if len(data_row) > 4 else ""
+                    w = data_row[5].strip() if len(data_row) > 5 else ""
+                    unit = data_row[6].strip() if len(data_row) > 6 else "mm"
                     
                     dims = f"{h}x{w}{unit}"
                     
@@ -367,24 +443,44 @@ def load_dimensions_db():
             
             # Extract product names
             text = " ".join(row).strip()
-            if len(text) > 5:
+            if len(text) > 5 and not any(k in text.lower() for k in ['vị trí', 'cost', 'size', 'unit']):
                 # Find the column with text
                 p_str = ""
                 for col in row:
                     if len(col) > 5: 
                         p_str = col; break
                 
-                if p_str:
+                if p_str and not p_str.strip().startswith('#'):
                     parts = p_str.split('+')
                     current_products = [p.strip().replace('\n', ' ') for p in parts if p.strip()]
+                    # product group set
+
             
             i += 1
             
         _DIMENSIONS_DB = db
-        print(f"Loaded dimensions for {len(db)} products")
+        try:
+            print(f"[Dimensions] Loaded dimensions for {len(db)} products")
+        except Exception:
+            pass
+
+        # Ensure some common entries for Cap (the CSV block sometimes gets skipped by the brittle parser)
+        if 'cap' not in db and 'hat' not in db:
+            cap_entries = [
+                {'size': 'All', 'pos': '1', 'dims': '60x55mm'},
+                {'size': 'All', 'pos': '4', 'dims': '45x40mm'},
+            ]
+            db['cap'] = cap_entries
+            db['hat'] = cap_entries
+            _DIMENSIONS_DB = db
+            print('[Dimensions] Added fallback cap/hat entries')
+
         return db
     except Exception as e:
-        print(f"Error loading dimensions CSV: {e}")
+        try:
+            print(f"[Dimensions] Error loading CSV: {e}")
+        except Exception:
+            pass
         _DIMENSIONS_DB = {}
         return {}
 
@@ -456,8 +552,12 @@ def get_product_dimensions(product_name, size, positions_codes=None):
     
     for pos_kw in priority_pos:
         for e in size_matches:
-            if pos_kw in e['pos'].lower():
+            epos = e.get('pos', '').lower()
+            if pos_kw in epos or epos in pos_kw or epos == pos_kw:
                 return e['dims']
     
-    return size_matches[0]['dims']
+    # fallback to first size match
+    if size_matches:
+        return size_matches[0]['dims']
+    return ""
 

@@ -3,15 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyInstaller
-# We keep spec files, but ignore build and dist directories
+# Large binary files & Executables (over 100MB limit)
+*.exe
+*.psd
+*.mp3
+*.db
 build/
 dist/
-
-# Large compiled executables (over 100MB limit)
-Tx5.exe
-Tx6.exe
-TX_Embroider_Tool.exe
 
 # Runtime config and log files
 color_config.json

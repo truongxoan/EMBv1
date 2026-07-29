@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                                QLabel, QPushButton, QFrame, QApplication, QCheckBox, QGridLayout, QDialog, QScrollArea, QSystemTrayIcon, QMenu, QLineEdit, QLayout, QProgressBar, QComboBox, QFileDialog)
+                                QLabel, QPushButton, QFrame, QApplication, QCheckBox, QGridLayout, QDialog, QScrollArea, QSystemTrayIcon, QMenu, QLineEdit, QLayout, QProgressBar, QComboBox, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QPropertyAnimation, QRect, QPoint, QByteArray, QEvent
 from PySide6.QtGui import QColor, QPalette, QLinearGradient, QPainter, QPen, QPixmap, QImage, QAction, QConicalGradient, QBrush, QIcon, QFont
 import os
@@ -11,6 +11,7 @@ import logic
 import keyboard
 import time
 import math
+import order_db
 from ui_components import HackerLabel, ScrollingLabel, FireworkParticle
 
 import security
@@ -23,6 +24,406 @@ try:
 except:
     HAS_WIN32 = False
     print("Warning: pywin32 not installed, window features disabled")
+
+class ImagePreviewDialog(QDialog):
+    """Sleek live-updating overlay window to display all details of the current order"""
+    def __init__(self, order_data, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        self.parent_app = parent
+        self._drag_pos = None
+        
+        # Central layout
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(8)
+        
+        # Outer border frame
+        self.frame = QFrame(self)
+        self.frame.setObjectName("MainFrame")
+        self.frame.setStyleSheet("""
+            #MainFrame {
+                background: transparent;
+                border: none;
+            }
+        """)
+        self.layout.addWidget(self.frame)
+        
+        frame_layout = QVBoxLayout(self.frame)
+        frame_layout.setContentsMargins(12, 12, 12, 12)
+        frame_layout.setSpacing(10)
+        
+        # 1. Custom Title Bar
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 4)
+        
+        self.lbl_title = QLabel("◆ CHI TIẾT ĐƠN HÀNG ◆")
+        self.lbl_title.setStyleSheet("color: #00ff41; font-family: 'Consolas', sans-serif; font-size: 12px; font-weight: bold;")
+        title_layout.addWidget(self.lbl_title)
+        
+        title_layout.addStretch()
+        
+        self.btn_close = QPushButton("×")
+        self.btn_close.setFixedSize(18, 18)
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ff3333;
+                font-size: 16px;
+                font-weight: bold;
+                border: none;
+                padding: 0;
+            }
+            QPushButton:hover {
+                color: #ff5555;
+                background: rgba(255, 50, 50, 30);
+                border-radius: 4px;
+            }
+        """)
+        self.btn_close.clicked.connect(self.close)
+        title_layout.addWidget(self.btn_close)
+        
+        frame_layout.addLayout(title_layout)
+        
+        # Separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("background-color: #333; max-height: 1px; border: none;")
+        frame_layout.addWidget(line)
+        
+        # 2. Main Content Splitter (Left: Info Grid, Right: Image)
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(14)
+        
+        # Left Panel (Info Grid)
+        info_widget = QWidget()
+        info_layout = QGridLayout(info_widget)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(8)
+        
+        label_style = "color: #888888; font-family: 'Consolas', 'Segoe UI'; font-size: 11px; font-weight: bold;"
+        value_style = "color: #ffffff; font-family: 'Consolas', 'Segoe UI'; font-size: 11px;"
+        value_highlight = "color: #00ff41; font-family: 'Consolas', 'Segoe UI'; font-size: 12px; font-weight: bold;"
+        
+        # Labels and Values setup
+        info_layout.addWidget(QLabel("Mã Đơn Hàng:", info_widget), 0, 0)
+        self.val_oid = QLabel("-", info_widget)
+        self.val_oid.setStyleSheet(value_highlight)
+        info_layout.addWidget(self.val_oid, 0, 1)
+        
+        info_layout.addWidget(QLabel("Sản Phẩm:", info_widget), 1, 0)
+        self.val_prod = QLabel("-", info_widget)
+        self.val_prod.setStyleSheet(value_style)
+        self.val_prod.setWordWrap(True)
+        info_layout.addWidget(self.val_prod, 1, 1)
+        
+        info_layout.addWidget(QLabel("Size / Kiểu:", info_widget), 2, 0)
+        self.val_size_mode = QLabel("-", info_widget)
+        self.val_size_mode.setStyleSheet(value_style)
+        info_layout.addWidget(self.val_size_mode, 2, 1)
+        
+        info_layout.addWidget(QLabel("Vị Trí Thêu:", info_widget), 3, 0)
+        self.val_pos = QLabel("-", info_widget)
+        self.val_pos.setStyleSheet(value_highlight)
+        info_layout.addWidget(self.val_pos, 3, 1)
+        
+        info_layout.addWidget(QLabel("Màu Chỉ:", info_widget), 4, 0)
+        self.val_color = QLabel("-", info_widget)
+        self.val_color.setStyleSheet(value_style)
+        info_layout.addWidget(self.val_color, 4, 1)
+        
+        info_layout.addWidget(QLabel("Màu Nền:", info_widget), 5, 0)
+        self.val_bg_color = QLabel("-", info_widget)
+        self.val_bg_color.setStyleSheet(value_style)
+        info_layout.addWidget(self.val_bg_color, 5, 1)
+        
+        info_layout.addWidget(QLabel("Kích Thước:", info_widget), 6, 0)
+        self.val_dims = QLabel("-", info_widget)
+        self.val_dims.setStyleSheet(value_style)
+        info_layout.addWidget(self.val_dims, 6, 1)
+        
+        # Style all label children in info_layout (column 0)
+        for r in range(7):
+            item = info_layout.itemAtPosition(r, 0)
+            if item and item.widget():
+                item.widget().setStyleSheet(label_style)
+                item.widget().setFixedWidth(85)
+                
+        content_layout.addWidget(info_widget, 1)
+        
+        # Right Panel (Image Container)
+        image_frame = QFrame()
+        image_frame.setStyleSheet("background-color: #030305; border: 1px solid #222; border-radius: 4px;")
+        image_frame_layout = QVBoxLayout(image_frame)
+        image_frame_layout.setContentsMargins(4, 4, 4, 4)
+        
+        self.lbl_image = QLabel(image_frame)
+        self.lbl_image.setAlignment(Qt.AlignCenter)
+        self.lbl_image.setFixedSize(220, 220)
+        self.lbl_image.setStyleSheet("border: none; color: #777; font-family: 'Consolas'; font-size: 10px;")
+        image_frame_layout.addWidget(self.lbl_image)
+        
+        content_layout.addWidget(image_frame)
+        frame_layout.addLayout(content_layout)
+        
+        # 3. Footer text
+        self.lbl_footer = QLabel("◆ Nhấn & giữ chuột để kéo di chuyển | Phím ESC để tắt ◆")
+        self.lbl_footer.setAlignment(Qt.AlignCenter)
+        self.lbl_footer.setStyleSheet("color: #555555; font-family: 'Consolas'; font-size: 9px;")
+        frame_layout.addWidget(self.lbl_footer)
+        
+        # Pulse animation and border color setup
+        self.border_color = QColor("#00ff41") # default cyber green
+        self.pulse_val = 0.0
+        self.pulse_timer = QTimer(self)
+        self.pulse_timer.timeout.connect(self.update_pulse)
+        self.pulse_timer.start(50)  # 20 FPS refresh rate
+        
+        # Load initial data and restore position
+        self.setFixedSize(560, 320)
+        self.update_order_data(order_data)
+        self.restore_position()
+        
+    def update_order_data(self, order_data):
+        """Update window text fields and design image dynamically without closing"""
+        if not order_data:
+            self.val_oid.setText("-")
+            self.val_prod.setText("-")
+            self.val_size_mode.setText("-")
+            self.val_pos.setText("-")
+            self.val_color.setText("-")
+            self.val_bg_color.setText("-")
+            self.val_dims.setText("-")
+            self.lbl_image.setText("Không có dữ liệu đơn hàng")
+            return
+            
+        oid = order_data.get('order_id', 'Unknown')
+        prod = order_data.get('product_name', '-')
+        size = order_data.get('size', '-')
+        mode = order_data.get('mode', '-')
+        pos = ", ".join(order_data.get('positions', ['4']))
+        color = order_data.get('thread_color', '-')
+        bg_color = order_data.get('bg_color', '-')
+        dims = order_data.get('dims', '-')
+        image_url = order_data.get('image_url', '')
+        
+        # Update text labels
+        self.val_oid.setText(oid)
+        self.val_prod.setText(prod)
+        self.val_size_mode.setText(f"{size} / {mode}")
+        self.val_pos.setText(pos)
+        self.val_color.setText(color)
+        self.val_bg_color.setText(bg_color)
+        self.val_dims.setText(dims)
+        
+        # Ambient color resolution (thread color prioritized, fallback to background color)
+        t_col = self.resolve_color(color)
+        bg_col = self.resolve_color(bg_color)
+        self.border_color = t_col or bg_col or QColor("#00ff41")
+        
+        # Update title text color to match border for cohesive high-tech branding
+        self.lbl_title.setStyleSheet(f"color: {self.border_color.name()}; font-family: 'Consolas', sans-serif; font-size: 12px; font-weight: bold;")
+        
+        # Load image (remote URL or fallback to local files)
+        self.load_design_image(image_url)
+
+    def load_design_image(self, image_url):
+        """Load and display the design image from a URL or local path"""
+        self.lbl_image.setText("Đang tải ảnh...")
+        
+        # Try local fallback paths first if url is empty
+        img_path = image_url
+        if not img_path:
+            # Look for local 1.png in order folder
+            if self.parent_app and self.parent_app.current_folder:
+                p1 = os.path.join(self.parent_app.current_folder, '1.png')
+                if os.path.exists(p1):
+                    img_path = p1
+            if not img_path:
+                desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+                p_desk = os.path.join(desktop, '1.png')
+                if os.path.exists(p_desk):
+                    img_path = p_desk
+                    
+        if not img_path:
+            self.lbl_image.setText("Không tìm thấy ảnh")
+            return
+            
+        if os.path.exists(img_path):
+            pixmap = QPixmap()
+            if pixmap.load(img_path):
+                self.display_pixmap(pixmap)
+            else:
+                self.lbl_image.setText("Lỗi định dạng ảnh")
+        elif img_path.startswith(('http://', 'https://')):
+            import threading
+            def download():
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(img_path, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response:
+                        img_data = response.read()
+                    qimg = QImage.fromData(img_data)
+                    px = QPixmap.fromImage(qimg)
+                    QTimer.singleShot(0, lambda: self.display_pixmap(px))
+                except Exception as e:
+                    print(f"Error loading viewer image: {e}")
+                    QTimer.singleShot(0, lambda: self.lbl_image.setText("Lỗi tải ảnh web"))
+            threading.Thread(target=download, daemon=True).start()
+        else:
+            self.lbl_image.setText("Không tìm thấy ảnh")
+            
+    def display_pixmap(self, pixmap):
+        if pixmap.isNull():
+            self.lbl_image.setText("Ảnh lỗi")
+            return
+        scaled = pixmap.scaled(self.lbl_image.width() - 8, self.lbl_image.height() - 8, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_image.setPixmap(scaled)
+        
+    def restore_position(self):
+        """Restore window position from configuration file"""
+        if self.parent_app and os.path.exists(self.parent_app._config_path):
+            import json
+            try:
+                with open(self.parent_app._config_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                x = cfg.get('viewer_x')
+                y = cfg.get('viewer_y')
+                if x is not None and y is not None:
+                    # Validate position fits on screen
+                    screen = QApplication.primaryScreen().geometry()
+                    if 0 <= x < screen.width() - 50 and 0 <= y < screen.height() - 50:
+                        self.move(x, y)
+                        return
+            except Exception as e:
+                print(f"Error restoring viewer position: {e}")
+                
+        # Center if no stored position
+        screen_geom = QApplication.primaryScreen().geometry()
+        self.move((screen_geom.width() - self.width()) // 2, (screen_geom.height() - self.height()) // 2)
+
+    def save_position(self):
+        """Save current window position to configuration file"""
+        if not self.parent_app:
+            return
+        import json
+        try:
+            cfg = {}
+            if os.path.exists(self.parent_app._config_path):
+                with open(self.parent_app._config_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+            cfg['viewer_x'] = self.pos().x()
+            cfg['viewer_y'] = self.pos().y()
+            with open(self.parent_app._config_path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            print(f"[VIEWER] Saved position: x={self.pos().x()}, y={self.pos().y()}")
+        except Exception as e:
+            print(f"Error saving viewer position: {e}")
+            
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = None
+            self.save_position() # Save on release
+            event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.accept()
+        else:
+            super().keyPressEvent(event)
+            
+    def resolve_color(self, color_name):
+        """Map English/Vietnamese color names to HEX values for ambient border indicator"""
+        if not color_name or color_name == '-':
+            return None
+        name_lower = color_name.strip().lower()
+        
+        mapping = {
+            'black': '#555555',     # Grey instead of pure black for visibility
+            'white': '#ffffff',
+            'red': '#ff3333',
+            'blue': '#0099ff',
+            'green': '#33ff33',
+            'yellow': '#ffff33',
+            'pink': '#ff66cc',
+            'purple': '#b833ff',
+            'orange': '#ff9900',
+            'navy': '#0033aa',
+            'grey': '#888888',
+            'gray': '#888888',
+            'brown': '#a0522d',
+            'cream': '#fffdd0',
+            'beige': '#f5f5dc',
+            'gold': '#ffd700',
+            'silver': '#c0c0c0',
+            
+            # Vietnamese names
+            'đen': '#555555',
+            'trắng': '#ffffff',
+            'đỏ': '#ff3333',
+            'xanh dương': '#0099ff',
+            'xanh lá': '#33ff33',
+            'vàng': '#ffff33',
+            'hồng': '#ff66cc',
+            'tím': '#b833ff',
+            'cam': '#ff9900',
+            'xám': '#888888',
+            'nâu': '#a0522d',
+            'kem': '#fffdd0'
+        }
+        
+        for key, hex_val in mapping.items():
+            if key in name_lower:
+                return QColor(hex_val)
+        return None
+
+    def update_pulse(self):
+        """Update pulse phase for breathing LED border effect and request repaint"""
+        self.pulse_val += 0.12 # Speed of pulsation
+        if self.pulse_val > 2 * math.pi:
+            self.pulse_val -= 2 * math.pi
+        self.update()
+
+    def paintEvent(self, event):
+        """Render custom dialog background and pulsating ambient color border"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Calculate alpha for breathing effect (oscillating between 120 and 255)
+        alpha = int(120 + 135 * abs(math.sin(self.pulse_val)))
+        
+        border_color_with_alpha = QColor(self.border_color)
+        border_color_with_alpha.setAlpha(alpha)
+        
+        # Draw translucent background panel
+        painter.setBrush(QBrush(QColor(6, 6, 9, 248)))
+        
+        # Draw border
+        pen = QPen(border_color_with_alpha, 2)
+        painter.setPen(pen)
+        
+        # Draw rounded rectangle (offset by 1px to prevent clipping)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        painter.drawRoundedRect(rect, 8, 8)
+        painter.end()
+
+    def closeEvent(self, event):
+        self.pulse_timer.stop()
+        self.save_position()
+        super().closeEvent(event)
 
 class TextUtilityDialog(QDialog):
     """Small sleek popup for text transformations"""
@@ -74,27 +475,40 @@ class TextUtilityDialog(QDialog):
         self.input_text.clear()
 
     def to_roman(self):
-        t = self.input_text.text()
+        t = self.input_text.text().strip()
         if t.isdigit():
-            val = int(t)
-            roman = {1000: 'M', 900: 'CM', 500: 'D', 400: 'CD', 100: 'C', 90: 'XC', 50: 'L', 40: 'XL', 10: 'X', 9: 'IX', 5: 'V', 4: 'IV', 1: 'I'}
-            res = ""
-            for v, r in roman.items():
-                while val >= v:
-                    res += r
-                    val -= v
-            self.input_text.setText(res)
+            try:
+                val = int(t)
+                roman = {1000: 'M', 900: 'CM', 500: 'D', 400: 'CD', 100: 'C', 90: 'XC', 50: 'L', 40: 'XL', 10: 'X', 9: 'IX', 5: 'V', 4: 'IV', 1: 'I'}
+                res = ""
+                for v, r in roman.items():
+                    while val >= v:
+                        res += r
+                        val -= v
+                self.input_text.setText(res)
+            except Exception:
+                self.input_text.setText("")
+        else:
+            # Not a number, do nothing or clear
+            pass
 
     def to_num(self):
-        t = self.input_text.text().upper()
+        t = self.input_text.text().upper().strip()
         roman = {'I':1,'V':5,'X':10,'L':50,'C':100,'D':500,'M':1000}
         res = 0
-        for i in range(len(t)):
-            if i > 0 and roman[t[i]] > roman[t[i-1]]:
-                res += roman[t[i]] - 2 * roman[t[i-1]]
-            else:
-                res += roman[t[i]]
-        self.input_text.setText(str(res) if res > 0 else "")
+        try:
+            for i in range(len(t)):
+                ch = t[i]
+                if ch not in roman:
+                    # Ignore non-roman characters instead of crashing
+                    continue
+                if i > 0 and roman[ch] > roman.get(t[i-1], 0):
+                    res += roman[ch] - 2 * roman.get(t[i-1], 0)
+                else:
+                    res += roman[ch]
+            self.input_text.setText(str(res) if res > 0 else "")
+        except Exception:
+            self.input_text.setText("")  # fail silently on bad input
 
 class HackMenuDialog(QDialog):
     """Bảng menu phím tắt phong cách Hacker (Hack Menu)"""
@@ -123,7 +537,7 @@ class HackMenuDialog(QDialog):
             ("ALT+E", "MO THU MUC", "Mo nhanh thu muc dang xu ly"),
             ("ALT+C", "COPY MA", "Sao chep ma don"),
             ("ALT+B", "CHUP ANH", "Chup cua so theu"),
-            ("ALT+I", "IMPORT IMG", "Tu dong dan 2.png roi 1.png vao Wilcom"),
+            ("ALT+I", "XEM ANH", "Hiển thị ảnh của đơn trực tiếp trên màn hình"),
             ("CTRL+B", "CHAY AUTO", "Chay quy trinh tu dong 3 buoc"),
             ("CTRL+SHIFT+B", "AUTO NHANH", "Chay auto nhanh bang phim phu"),
             ("CTRL+SHIFT+V", "COPY MIX", "Copy ID kem vi tri da tick"),
@@ -159,6 +573,146 @@ class HackMenuDialog(QDialog):
         layout.addWidget(footer)
         
         self.setFixedWidth(350)
+
+class OrderHistoryDialog(QDialog):
+    """Dialog displaying SQLite order history with search, load, open folder, and export CSV features"""
+    def __init__(self, parent_app=None):
+        super().__init__(parent_app)
+        self.parent_app = parent_app
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setFixedSize(700, 420)
+        self.setStyleSheet("""
+            QDialog { background: #0b0c10; border: 2px solid #00f3ff; border-radius: 8px; color: #ffffff; }
+            QLabel { font-family: 'Consolas', 'Segoe UI'; color: #c5c6c7; font-size: 11px; }
+            QLineEdit { background: #1f2833; border: 1px solid #45a29e; color: #66fcf1; border-radius: 4px; padding: 4px; font-family: 'Consolas'; }
+            QPushButton { background: #1f2833; border: 1px solid #45a29e; color: #66fcf1; border-radius: 4px; font-family: 'Consolas'; font-size: 10px; padding: 4px 8px; font-weight: bold; }
+            QPushButton:hover { background: #45a29e; color: #0b0c10; }
+            QTableWidget { background: #1f2833; color: #ffffff; gridline-color: #333333; border: 1px solid #45a29e; font-size: 10px; font-family: 'Consolas'; }
+            QHeaderView::section { background: #0b0c10; color: #66fcf1; border: 1px solid #45a29e; font-weight: bold; padding: 4px; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Header bar
+        header_box = QHBoxLayout()
+        title = QLabel("📜 LỊCH SỬ ĐƠN HÀNG (SQLITE DATABASE)")
+        title.setStyleSheet("color: #00f3ff; font-weight: bold; font-size: 13px;")
+        header_box.addWidget(title)
+        
+        header_box.addStretch()
+
+        self.lbl_today = QLabel("Hôm nay: 0 đơn")
+        self.lbl_today.setStyleSheet("color: #00ff41; font-weight: bold;")
+        header_box.addWidget(self.lbl_today)
+
+        btn_close = QPushButton("✕ Đóng")
+        btn_close.clicked.connect(self.close)
+        header_box.addWidget(btn_close)
+        layout.addLayout(header_box)
+
+        # Search bar & Export row
+        search_box = QHBoxLayout()
+        search_label = QLabel("🔍 Tìm kiếm:")
+        search_box.addWidget(search_label)
+
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Nhập mã đơn, tên sản phẩm, loại file, màu chỉ...")
+        self.txt_search.textChanged.connect(self.load_data)
+        search_box.addWidget(self.txt_search, 1)
+
+        btn_export = QPushButton("📊 Xuất CSV")
+        btn_export.clicked.connect(self.on_export_csv)
+        search_box.addWidget(btn_export)
+        layout.addLayout(search_box)
+
+        # Table Widget
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["ID Đơn", "Sản Phẩm", "Loại File", "Màu Chỉ", "Kích Thước", "Thời Gian", "Thao Tác"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.table)
+
+        self.load_data()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and hasattr(self, '_drag_pos') and self._drag_pos:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def load_data(self):
+        query = self.txt_search.text().strip() if hasattr(self, 'txt_search') else ""
+        orders = order_db.get_orders(query, limit=200)
+        today_count = order_db.get_today_count()
+        self.lbl_today.setText(f"Hôm nay: {today_count} đơn")
+
+        self.table.setRowCount(0)
+        for row_idx, o in enumerate(orders):
+            self.table.insertRow(row_idx)
+            
+            self.table.setItem(row_idx, 0, QTableWidgetItem(str(o.get('order_id', ''))))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(str(o.get('product_name', ''))))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(str(o.get('file_type', ''))))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(str(o.get('thread_color', ''))))
+            
+            dims_text = str(o.get('dims', '')) or str(o.get('size', ''))
+            self.table.setItem(row_idx, 4, QTableWidgetItem(dims_text))
+            self.table.setItem(row_idx, 5, QTableWidgetItem(str(o.get('created_at', ''))))
+
+            # Action buttons cell
+            btn_cell = QWidget()
+            btn_layout = QHBoxLayout(btn_cell)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
+
+            btn_load = QPushButton("🔄 Load")
+            btn_load.setToolTip("Nạp đơn này lên giao diện chính")
+            btn_load.clicked.connect(lambda checked, order=o: self.on_load_order(order))
+            btn_layout.addWidget(btn_load)
+
+            folder_path = o.get('export_folder', '')
+            if folder_path and os.path.exists(folder_path):
+                btn_folder = QPushButton("📁 Folder")
+                btn_folder.setToolTip("Mở thư mục chứa file")
+                btn_folder.clicked.connect(lambda checked, f=folder_path: os.startfile(f))
+                btn_layout.addWidget(btn_folder)
+
+            self.table.setCellWidget(row_idx, 6, btn_cell)
+
+    def on_load_order(self, order_data):
+        if self.parent_app:
+            parsed = {
+                'order_id': order_data.get('order_id'),
+                'product_name': order_data.get('product_name'),
+                'variant_info': order_data.get('variant_info'),
+                'thread_color': order_data.get('thread_color'),
+                'bg_color': order_data.get('bg_color'),
+                'file_type': order_data.get('file_type'),
+                'size': order_data.get('size'),
+                'dims': order_data.get('dims'),
+                'positions': []
+            }
+            self.parent_app.update_data(parsed)
+            self.parent_app.flash_status("LOADED OK", "#00ff41")
+            self.close()
+
+    def on_export_csv(self):
+        default_name = f"Order_History_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Xuất file CSV Lịch Sử Đơn", default_name, "CSV Files (*.csv)")
+        if path:
+            count = order_db.export_to_csv(path)
+            QMessageBox.information(self, "Thành Công", f"Đã xuất thành công {count} đơn hàng ra file:\n{path}")
 
 class LicenseDialog(QDialog):
     """Dialog shown when access is denied"""
@@ -301,8 +855,8 @@ class InfoOverlay(QWidget):
         layout.addWidget(self.lbl_line2)
         self.setFixedSize(550, 42)
         
-    def update_info(self, id_val, name, size, f_type, dims):
-        self.lbl_line1.setText(f"◆ MÃ: {id_val}  |  LOẠI: {f_type} ◆")
+    def update_info(self, id_val, name, size, f_type, dims, thread_color="-"):
+        self.lbl_line1.setText(f"◆ MÃ: {id_val}  |  LOẠI: {f_type}  |  MÀU CHỈ: {thread_color} ◆")
         detail = f"➤ TÊN: {name}  |  SIZE: {size}"
         if dims and dims != "-":
             detail += f"  ({dims})"
@@ -385,349 +939,7 @@ class HelpButton(QPushButton):
             self.tooltip = None
         super().leaveEvent(event)
 
-class SpinningDisc(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(20, 20)
-        self.angle = 0
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.rotate)
-        self.timer.start(50)
-        self.is_playing = False
-        
-    def rotate(self):
-        if self.is_playing:
-            self.angle = (self.angle + 8) % 360
-            self.update()
-            
-    def set_playing(self, playing):
-        self.is_playing = playing
-        self.update()
-        
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect()
-        
-        painter.translate(rect.center())
-        painter.rotate(self.angle)
-        
-        # Draw vinyl background
-        painter.setPen(QPen(QColor(0, 255, 65, 100), 1))
-        painter.setBrush(QBrush(QColor(15, 15, 20)))
-        painter.drawEllipse(-9, -9, 18, 18)
-        
-        # Draw groove
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor(0, 255, 65, 40), 1))
-        painter.drawEllipse(-6, -6, 12, 12)
-        
-        # Draw center label
-        painter.setBrush(QBrush(QColor(0, 255, 65)))
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(-2, -2, 4, 4)
-        
-        painter.end()
-
-class MusicVisualizer(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(40, 16)
-        self.bars = [2, 2, 2, 2, 2]
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.animate)
-        self.timer.start(100)
-        self.is_playing = False
-        
-    def animate(self):
-        if self.is_playing:
-            self.bars = [random.randint(2, 14) for _ in range(5)]
-        else:
-            self.bars = [2] * 5
-        self.update()
-        
-    def set_playing(self, playing):
-        self.is_playing = playing
-        if not playing:
-            self.bars = [2] * 5
-        self.update()
-        
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        width = self.width()
-        height = self.height()
-        num_bars = len(self.bars)
-        bar_width = 4
-        spacing = 2
-        
-        total_width = num_bars * bar_width + (num_bars - 1) * spacing
-        start_x = (width - total_width) // 2
-        
-        for i in range(num_bars):
-            x = start_x + i * (bar_width + spacing)
-            bar_height = self.bars[i]
-            y = height - bar_height
-            
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(0, 255, 65)))
-            painter.drawRoundedRect(x, y, bar_width, bar_height, 1, 1)
-            
-        painter.end()
-
-
-try:
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-    from PySide6.QtCore import QUrl
-    HAS_MULTIMEDIA = True
-except Exception as e:
-    HAS_MULTIMEDIA = False
-    print(f"QtMultimedia not available: {e}")
-
-
-class YoutubeUrlExtractor(QThread):
-    finished_url = Signal(str, str)  # (stream_url, title)
-    error = Signal(str)
-
-    def __init__(self, youtube_url):
-        super().__init__()
-        self.youtube_url = youtube_url
-
-    def run(self):
-        try:
-            import yt_dlp
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'quiet': True,
-                'no_warnings': True,
-                'nocheckcertificate': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.youtube_url, download=False)
-                stream_url = info.get('url')
-                title = info.get('title', 'YouTube Video')
-                if stream_url:
-                    self.finished_url.emit(stream_url, title)
-                else:
-                    self.error.emit("No audio url found")
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class MusicPlayerWidget(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("""
-            MusicPlayerWidget {
-                background: rgba(10, 10, 15, 180);
-                border: 1px solid rgba(0, 255, 65, 80);
-                border-radius: 6px;
-            }
-        """)
-        self.setFixedHeight(30)
-        
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.setSpacing(5)
-        
-        # 1. Spinning Disc
-        self.disc = SpinningDisc(self)
-        layout.addWidget(self.disc)
-        
-        # 2. Controls: Play & Next
-        control_lay = QHBoxLayout()
-        control_lay.setSpacing(4)
-        
-        self.btn_play = QPushButton("▶")
-        self.btn_play.setFixedSize(16, 16)
-        self.btn_play.setStyleSheet("""
-            QPushButton {
-                background: #020502;
-                border: 1px solid #00ff41;
-                border-radius: 8px;
-                color: #00ff41;
-                font-size: 8px;
-                font-weight: bold;
-                padding: 0;
-            }
-            QPushButton:hover { background: #002200; }
-        """)
-        self.btn_play.clicked.connect(self.toggle_play)
-        control_lay.addWidget(self.btn_play)
-        
-        self.btn_next = QPushButton("⏭")
-        self.btn_next.setFixedSize(16, 16)
-        self.btn_next.setStyleSheet("""
-            QPushButton {
-                background: #020502;
-                border: 1px solid #00ff41;
-                border-radius: 8px;
-                color: #00ff41;
-                font-size: 8px;
-                font-weight: bold;
-                padding: 0;
-            }
-            QPushButton:hover { background: #002200; }
-        """)
-        self.btn_next.clicked.connect(self.play_next)
-        control_lay.addWidget(self.btn_next)
-        
-        layout.addLayout(control_lay)
-        
-        # Song label
-        self.lbl_song = QLabel("Synth Lofi")
-        self.lbl_song.setStyleSheet("color: #00ff41; font-size: 8px; font-weight: bold; font-family: 'Consolas';")
-        self.lbl_song.setFixedWidth(120)
-        self.lbl_song.setToolTip("Tên bài hát")
-        layout.addWidget(self.lbl_song)
-        
-        # 3. Visualizer
-        self.visualizer = MusicVisualizer(self)
-        layout.addWidget(self.visualizer)
-        
-        self.is_playing = False
-        self.playlist = []
-        self.current_index = -1
-        self.extractor = None
-        
-        if HAS_MULTIMEDIA:
-            self.player = QMediaPlayer(self)
-            self.audio_output = QAudioOutput(self)
-            self.player.setAudioOutput(self.audio_output)
-            self.audio_output.setVolume(0.3)
-            self.player.mediaStatusChanged.connect(self._status_changed)
-        else:
-            self.player = None
-
-        # Load playlist immediately
-        self.reload_playlist()
-        
-    def reload_playlist(self):
-        self.playlist = []
-        if getattr(sys, 'frozen', False):
-            app_dir = os.path.dirname(sys.executable)
-        else:
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-        music_dir = os.path.join(app_dir, "Music")
-        if not os.path.exists(music_dir):
-            os.makedirs(music_dir)
-            # Create default youtube_links.txt template
-            txt_path = os.path.join(music_dir, "youtube_links.txt")
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write("# Dán link nhạc Youtube tại đây (mỗi dòng 1 link)\n")
-                f.write("https://www.youtube.com/watch?v=dQw4w9WgXcQ\n")
-        
-        import glob
-        # Scan local files
-        for ext in ("*.mp3", "*.wav", "*.m4a"):
-            for fpath in glob.glob(os.path.join(music_dir, ext)):
-                self.playlist.append({"type": "local", "path": fpath, "title": os.path.basename(fpath)})
-        
-        # Scan YouTube links
-        txt_path = os.path.join(music_dir, "youtube_links.txt")
-        if os.path.exists(txt_path):
-            try:
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            self.playlist.append({"type": "youtube", "path": line, "title": "Youtube Link"})
-            except Exception as e:
-                print(f"Error loading youtube links: {e}")
-
-        # If playlist is empty, add a default fallback local / remote stream
-        if not self.playlist:
-            self.playlist.append({
-                "type": "remote", 
-                "path": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", 
-                "title": "Synth Lofi"
-            })
-            
-    def toggle_play(self):
-        if not self.playlist:
-            self.reload_playlist()
-            
-        if self.current_index == -1 and self.playlist:
-            self.current_index = 0
-            self._load_current_track()
-            self.is_playing = True
-        else:
-            self.is_playing = not self.is_playing
-            
-        self.disc.set_playing(self.is_playing)
-        self.visualizer.set_playing(self.is_playing)
-        
-        if self.is_playing:
-            self.btn_play.setText("⏸")
-            if self.player:
-                self.player.play()
-        else:
-            self.btn_play.setText("▶")
-            if self.player:
-                self.player.pause()
-
-    def play_next(self):
-        if not self.playlist:
-            self.reload_playlist()
-        if not self.playlist:
-            return
-            
-        self.current_index = (self.current_index + 1) % len(self.playlist)
-        self._load_current_track()
-        
-        self.is_playing = True
-        self.disc.set_playing(True)
-        self.visualizer.set_playing(True)
-        self.btn_play.setText("⏸")
-
-    def _load_current_track(self):
-        if not self.player:
-            return
-            
-        self.player.stop()
-        if self.extractor:
-            self.extractor.terminate()
-            self.extractor = None
-            
-        track = self.playlist[self.current_index]
-        self.lbl_song.setText(track["title"][:20])
-        self.lbl_song.setToolTip(track["title"])
-        
-        if track["type"] == "local":
-            self.player.setSource(QUrl.fromLocalFile(track["path"]))
-            self.player.play()
-        elif track["type"] == "remote":
-            self.player.setSource(QUrl(track["path"]))
-            self.player.play()
-        elif track["type"] == "youtube":
-            self.lbl_song.setText("⏳ Loading Youtube...")
-            self.extractor = YoutubeUrlExtractor(track["path"])
-            self.extractor.finished_url.connect(self._play_youtube_stream)
-            self.extractor.error.connect(self._handle_extractor_error)
-            self.extractor.start()
-            
-    def _play_youtube_stream(self, stream_url, title):
-        if self.player:
-            self.lbl_song.setText(title[:20])
-            self.lbl_song.setToolTip(title)
-            # Update title in our playlist cache
-            self.playlist[self.current_index]["title"] = title
-            self.player.setSource(QUrl(stream_url))
-            if self.is_playing:
-                self.player.play()
-                
-    def _handle_extractor_error(self, err):
-        self.lbl_song.setText("❌ Error loading YT")
-        QTimer.singleShot(2500, self.play_next)
-        
-    def _status_changed(self, status):
-        try:
-            from PySide6.QtMultimedia import QMediaPlayer
-            if status == QMediaPlayer.EndOfMedia:
-                self.play_next()
-        except:
-            pass
+# Music player functionality removed per user request
 
 class MiniApp(QMainWindow):
     # Define Signal for Thread-Safe Updates
@@ -741,9 +953,12 @@ class MiniApp(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(165, 222)
+        self.setFixedSize(165, 192)
+        self.setAcceptDrops(True) # Enable drag-and-drop for PNG files
         
         self.current_data = {}
+        self.order_queue = []     # Queue of accumulated orders
+        self.order_history = []   # History of completed orders
         self.current_folder = None
         self._drag_pos = None
         self.last_copied = ""  # Store for screenshot naming
@@ -767,6 +982,7 @@ class MiniApp(QMainWindow):
         self.is_expanded = True
         self.is_pinned = True
         self.auto_trigger_enabled = False  # Auto-trigger when data arrives (DEFAULT OFF)
+        self.preview_window = None
         
         # Docking state
         self.is_docked = False
@@ -832,6 +1048,11 @@ class MiniApp(QMainWindow):
         self.progress_signal.connect(self.set_progress)
         self.show_success_toast_signal.connect(self.show_success_toast)
         self.hotkey_triggered_signal.connect(self._handle_hotkey_on_main_thread)
+
+        # Auto Folder Dialog Detector Thread
+        self.is_closing = False
+        import threading
+        threading.Thread(target=self.auto_folder_dialog_detector, daemon=True).start()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -982,6 +1203,20 @@ class MiniApp(QMainWindow):
         self.btn_overlay_title.setToolTip("Toggle HUD Overlay")
         title_bar.addWidget(self.btn_overlay_title)
 
+        self.btn_history_title = QPushButton("📜")
+        self.btn_history_title.setFixedSize(12, 12)
+        self.btn_history_title.setStyleSheet("background: transparent; color: #00f3ff; font-size: 8px; font-weight: bold; border: none; padding: 0;")
+        self.btn_history_title.clicked.connect(self.on_show_history)
+        self.btn_history_title.setToolTip("Xem Lịch sử Đơn hàng (DB)")
+        title_bar.addWidget(self.btn_history_title)
+
+        self.btn_mini_mode = QPushButton("🗗")
+        self.btn_mini_mode.setFixedSize(12, 12)
+        self.btn_mini_mode.setStyleSheet("background: transparent; color: #ff00ff; font-size: 8px; font-weight: bold; border: none; padding: 0;")
+        self.btn_mini_mode.clicked.connect(self.on_toggle_mini_widget)
+        self.btn_mini_mode.setToolTip("Thu nhỏ thành Mini Floating Widget")
+        title_bar.addWidget(self.btn_mini_mode)
+
         self.btn_pin_title = QPushButton("📌")
         self.btn_pin_title.setFixedSize(12, 12)
         self.btn_pin_title.setStyleSheet("background: transparent; color: #ff3333; font-size: 8px; font-weight: bold; border: none; padding: 0;")
@@ -1015,11 +1250,17 @@ class MiniApp(QMainWindow):
 
         main_layout.addLayout(title_bar)
 
-        # 2. Order ID
+        # 2. Order ID row
+        id_layout = QHBoxLayout()
+        id_layout.setContentsMargins(0, 0, 0, 0)
+        id_layout.setSpacing(4)
+
         self.lbl_id = ScrollingLabel("WAITING DATA...")
         self.lbl_id.setStyleSheet("color: #ffffff; font-family: 'Consolas', 'Segoe UI'; font-weight: bold; font-size: 13px; background: transparent;")
         self.lbl_id.setFixedHeight(18)
-        main_layout.addWidget(self.lbl_id)
+        id_layout.addWidget(self.lbl_id, 1)
+
+        main_layout.addLayout(id_layout)
 
         # 3. Product / Mode
         self.btn_mode = QPushButton("WAITING...")
@@ -1157,65 +1398,43 @@ class MiniApp(QMainWindow):
         self.btn_reset.clicked.connect(self.on_reset)
         self.btn_reset.setToolTip("Reset data (Ctrl+R)")
 
-        # Combobox for launching tools (compact)
-        self.cb_tools = QComboBox()
-        self.cb_tools.setFixedSize(70, 24)
-        self.cb_tools.setStyleSheet("""
-            QComboBox {
-                background: #020502;
-                border: 1px solid #00ff41;
-                border-radius: 4px;
-                color: #00ff41;
-                font-family: 'Segoe UI', 'Consolas', sans-serif;
-                font-size: 7px;
-                font-weight: bold;
-                padding: 1px 12px 1px 4px;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 10px;
-                border-left: 1px solid #00ff41;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border: 2px solid transparent;
-                border-top-color: #00ff41;
-                margin-top: 2px;
-            }
-            QComboBox QAbstractItemView {
-                background: #020502;
-                border: 1px solid #00ff41;
-                color: #00ff41;
-                selection-background-color: #00ff41;
-                selection-color: #020502;
-                font-size: 8px;
-            }
-        """)
-        self.cb_tools.addItems(["Chọn Tool...", "In (PS Auto)", "Thêu (PatchPrint)", "🎲 Game Tài Xỉu"])
+        # In Button (auto function placeholder / DXF export)
+        self.btn_in = QPushButton("🖨️")
+        self.btn_in.setFixedSize(24, 24)
+        self.btn_in.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #00ff41; font-size: 12px; font-weight: bold; } QPushButton:hover { background: #003300; color: #ffffff; }")
+        self.btn_in.clicked.connect(self.on_in_click)
+        self.btn_in.setToolTip("Xuất file cắt DXF từ ảnh trong thư mục")
 
-        # Run button next to combobox
-        self.btn_run_tool = QPushButton("▶")
-        self.btn_run_tool.setFixedSize(20, 24)
-        self.btn_run_tool.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #00ff41; font-size: 10px; font-weight: bold; } QPushButton:hover { background: #003300; color: #ffffff; }")
-        self.btn_run_tool.clicked.connect(self.on_run_tool)
-        self.btn_run_tool.setToolTip("Chạy tool đã chọn")
+        # Download Image Button
+        self.btn_download_img = QPushButton("⬇️")
+        self.btn_download_img.setFixedSize(24, 24)
+        self.btn_download_img.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #ffcc00; font-size: 12px; font-weight: bold; } QPushButton:hover { background: #002200; }")
+        self.btn_download_img.clicked.connect(lambda: self.on_download_image_clicked("f11"))
+        self.btn_download_img.setToolTip("Tải ảnh từ Web và chạy action f11.atn")
+
+        # Download Pet Button
+        self.btn_download_pet = QPushButton("🐾")
+        self.btn_download_pet.setFixedSize(24, 24)
+        self.btn_download_pet.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #ff99ff; font-size: 12px; font-weight: bold; } QPushButton:hover { background: #002200; }")
+        self.btn_download_pet.clicked.connect(lambda: self.on_download_image_clicked("pet"))
+        self.btn_download_pet.setToolTip("Tải ảnh từ Web và chạy action pet.atn")
+
+        # View Image Button
+        self.btn_view_image = QPushButton("👁️")
+        self.btn_view_image.setFixedSize(24, 24)
+        self.btn_view_image.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #00e5ff; font-size: 11px; font-weight: bold; } QPushButton:hover { background: #002233; color: #ffffff; }")
+        self.btn_view_image.clicked.connect(self.on_view_image_clicked)
+        self.btn_view_image.setToolTip("Xem ảnh đơn hàng trực tiếp (Alt+I)")
 
         # QHBoxLayout for the bottom row
         row2_layout = QHBoxLayout()
-        row2_layout.setSpacing(2)
+        row2_layout.setSpacing(4)
         row2_layout.setContentsMargins(0, 0, 0, 0)
         row2_layout.addWidget(self.btn_reset)
-        row2_layout.addWidget(self.cb_tools)
-        row2_layout.addWidget(self.btn_run_tool)
-        
-        # Paste 2 images into Wilcom Button
-        self.btn_paste_wilcom = QPushButton("📥")
-        self.btn_paste_wilcom.setFixedSize(24, 24)
-        self.btn_paste_wilcom.setStyleSheet("QPushButton { background: #020502; border: 1px solid #00ff41; border-radius: 4px; color: #00e5ff; font-size: 11px; font-weight: bold; } QPushButton:hover { background: #002233; color: #ffffff; }")
-        self.btn_paste_wilcom.clicked.connect(self.on_paste_wilcom_clicked)
-        self.btn_paste_wilcom.setToolTip("Auto dán 2 ảnh (2.png -> 1.png) vào Wilcom (Alt+I)")
-        row2_layout.addWidget(self.btn_paste_wilcom)
+        row2_layout.addWidget(self.btn_in)
+        row2_layout.addWidget(self.btn_download_img)
+        row2_layout.addWidget(self.btn_download_pet)
+        row2_layout.addWidget(self.btn_view_image)
         row2_layout.addStretch()
         
         row2_widget = QWidget()
@@ -1229,10 +1448,6 @@ class MiniApp(QMainWindow):
         grid.addWidget(row2_widget, 1, 0, 1, 4)
 
         main_layout.addWidget(grid_widget)
-
-        # 8. Music Player
-        self.music_player = MusicPlayerWidget(self)
-        main_layout.addWidget(self.music_player)
 
         # Create dummy references so existing functions don't fail
         self.lbl_fps = QLabel()
@@ -1425,7 +1640,7 @@ class MiniApp(QMainWindow):
             elif action == 'insert':
                 self.hotkey_toggle_visibility()
             elif action == 'alt+i':
-                self.on_paste_wilcom_clicked()
+                self.on_view_image_clicked()
         except Exception as e:
             print(f"Error handling hotkey {action} on main thread: {e}")
 
@@ -1586,9 +1801,13 @@ class MiniApp(QMainWindow):
             text = self.current_data.get('size', '')
 
     def find_wilcom_hwnd(self):
-        """Find the Ultimate Special Edition window HWND."""
+        """Find the Wilcom window HWND, searching by keywords or child class name."""
+        if not HAS_WIN32:
+            return None
         search_keywords = ["Ultimate Special", "[Ultimate", "Embroid", "Wilcom", "Tajima", "Pulse"]
         hwnd = None
+        
+        # 1. Search by title keywords
         def enum_handler(h, _):
             nonlocal hwnd
             if hwnd:
@@ -1600,7 +1819,54 @@ class MiniApp(QMainWindow):
                 if 'TX Embroider' not in title and 'TX EMBROIDER' not in title:
                     hwnd = h
         win32gui.EnumWindows(enum_handler, None)
+        if hwnd:
+            return hwnd
+            
+        # 2. Fallback: Search for any window that has a child of class "AfxFrameOrView140u"
+        def find_child_class(parent_h):
+            found = False
+            def check_child(child_h, _):
+                nonlocal found
+                cls = win32gui.GetClassName(child_h)
+                if "AfxFrameOrView140u" in cls or cls.lower() == "afxframeorview140u":
+                    found = True
+                return not found # stop if found
+            try:
+                win32gui.EnumChildWindows(parent_h, check_child, None)
+            except:
+                pass
+            return found
+
+        def enum_handler_fallback(h, _):
+            nonlocal hwnd
+            if hwnd:
+                return
+            if not win32gui.IsWindowVisible(h):
+                return
+            if find_child_class(h):
+                hwnd = h
+                
+        win32gui.EnumWindows(enum_handler_fallback, None)
         return hwnd
+
+    def find_wilcom_view_hwnd(self, parent_hwnd):
+        """Find child control of class AfxFrameOrView140u (Instance 1)"""
+        if not HAS_WIN32:
+            return None
+        children = []
+        def enum_child(hwnd, _):
+            cls = win32gui.GetClassName(hwnd)
+            if "AfxFrameOrView140u" in cls or cls.lower() == "afxframeorview140u":
+                children.append(hwnd)
+            return True
+        try:
+            win32gui.EnumChildWindows(parent_hwnd, enum_child, None)
+        except Exception as e:
+            print(f"Error enumerating child windows: {e}")
+        if children:
+            print(f"Found AfxFrameOrView140u view windows: {children}")
+            return children[0]  # First instance (AfxFrameOrView140u1)
+        return None
 
     def focus_wilcom_window(self):
         """Find and force-foreground the Ultimate Special Edition window."""
@@ -1713,58 +1979,22 @@ class MiniApp(QMainWindow):
             print(f'[DRAG] mouse drag error: {e}')
             return False
 
-    def on_paste_wilcom_clicked(self):
-        """Worker thread: drag-drop 2.png then 1.png into Ultimate Special Edition."""
-        import threading
+    def on_view_image_clicked(self):
+        """Display or update the live Order Details Viewer window"""
+        if not hasattr(self, 'preview_window') or self.preview_window is None:
+            # Create a new non-modal dialog passing the whole current_data dict
+            self.preview_window = ImagePreviewDialog(self.current_data, self)
+            self.preview_window.finished.connect(self._on_preview_window_finished)
+            self.preview_window.show()
+        else:
+            # Update the existing open window with the current data
+            self.preview_window.update_order_data(self.current_data)
+            self.preview_window.raise_()
+            self.preview_window.activateWindow()
 
-        def drop_one(file_path, label, hwnd):
-            self.status_signal.emit(f'Keo {label}...', '#00ffff')
-            # Method 1: WM_DROPFILES — instant, no mouse
-            self.drop_file_wm(hwnd, file_path)
-            print(f'[DRAG] WM_DROPFILES sent: {label}')
-            return True
-
-        def run():
-            try:
-                desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-                def resolve(name):
-                    p = os.path.join(desktop, name)
-                    if os.path.exists(p):
-                        return p
-                    p2 = os.path.join(desktop, name.upper())
-                    return p2 if os.path.exists(p2) else None
-
-                img2 = resolve('2.png')
-                img1 = resolve('1.png')
-
-                if not img2 and not img1:
-                    self.status_signal.emit('Thieu 1.png & 2.png', '#ff3333')
-                    return
-
-                self.status_signal.emit('Tim Wilcom...', '#ffff00')
-                hwnd = self.find_wilcom_hwnd()
-                if not hwnd:
-                    self.status_signal.emit('Khong thay Wilcom', '#ff3333')
-                    return
-
-                self.focus_wilcom_window()
-
-                if img2:
-                    drop_one(img2, '2.png', hwnd)
-                    time.sleep(0.5)
-
-                if img1:
-                    drop_one(img1, '1.png', hwnd)
-                    time.sleep(0.3)
-
-                self.status_signal.emit('Keo tha xong!', '#00ff41')
-                self.show_success_toast_signal.emit('Keo tha anh vao Wilcom thanh cong!')
-
-            except Exception as e:
-                print(f'[DRAG] Error: {e}')
-                self.status_signal.emit('Loi keo tha', '#ff3333')
-
-        threading.Thread(target=run, daemon=True).start()
+    def _on_preview_window_finished(self):
+        # Clean up reference when closed
+        self.preview_window = None
 
     def flash_status(self, text, color="#00ff41"):
         # Emit signal to update UI from Main Thread
@@ -1840,6 +2070,8 @@ class MiniApp(QMainWindow):
     def on_reset(self):
         """Reset all data and checkboxes"""
         self.current_data = {}
+        self.order_queue = []
+        self.order_history = []
         self.lbl_id.original_text = "WAITING DATA..."
         self.lbl_id.setText("WAITING DATA...")
         self.btn_mode.setText("WAITING...")
@@ -1909,124 +2141,69 @@ class MiniApp(QMainWindow):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-    def on_run_tool(self):
-        """Run the currently selected tool in the combobox (no black window)"""
-        index = self.cb_tools.currentIndex()
-        if index == 0:
-            self.flash_status("Chon tool truoc!", "#ffcc00")
+    def on_in_click(self):
+        """Chức năng xuất file cắt của in cho đơn hiện tại - mặc định lấy 2.png từ Desktop và xuất ra Desktop"""
+        oid = self.current_data.get('order_id', 'Unknown') if hasattr(self, 'current_data') and self.current_data else 'Unknown'
+        if not oid or oid == 'Unknown':
+            self.flash_status("NO ORDER", "#ff3333")
             return
-
-        tool_name = self.cb_tools.itemText(index)
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        def get_exe(exe_name, fallback_dirs):
-            import sys
-            # 1. Same folder as this script (ChestEMB/)
-            local = os.path.join(script_dir, exe_name)
-            if os.path.exists(local):
-                return local
-            # 2. PyInstaller bundle
-            if getattr(sys, 'frozen', False):
-                bundled = os.path.join(sys._MEIPASS, 'tools', exe_name)
-                if os.path.exists(bundled):
-                    return bundled
-            # 3. Fallback directories
-            for d in fallback_dirs:
-                p = os.path.join(d, exe_name)
-                if os.path.exists(p):
-                    return p
-            return None
-
-        if tool_name == "In (PS Auto)":
-            exe = get_exe('PS_Auto_GUI1.exe', [
-                r'C:\Users\Tx\Desktop\vibecoder\ChestEMB',
-                r'C:\Users\Tx\Desktop\vibecoder\in\dist',
-                r'C:\Users\Tx\Desktop\vibecoder\in',
-            ])
-            if exe:
-                self._launch_exe_silent(exe)
-                self.flash_status("Launch PS Auto", "#00ff41")
-            else:
-                self.flash_status("Khong tim thay exe", "#ff3333")
-
-        elif tool_name == "Thêu (PatchPrint)":
-            exe = get_exe('A-PatchPrint.exe', [
-                r'C:\Users\Tx\Desktop\vibecoder\ChestEMB',
-                r'C:\Users\Tx\Desktop\vibecoder\thêu\A-PatchPrint',
-            ])
-            if exe:
-                self._launch_exe_silent(exe)
-                self.flash_status("Launch PatchPrint", "#00ff41")
-            else:
-                self.flash_status("Khong tim thay exe", "#ff3333")
-        elif tool_name == "🎲 Game Tài Xỉu":
-            self.on_open_mini_game()
+            
+        # Find checked checkbox
+        checked_pos = ""
+        for key, chk in self.chk_groups.items():
+            if chk.isVisible() and chk.isChecked():
+                checked_pos = key
+                break
+                
+        if not checked_pos:
+            # Fallback to the first visible checkbox
+            for key, chk in self.chk_groups.items():
+                if chk.isVisible():
+                    checked_pos = key
+                    chk.setChecked(True)
+                    break
+                    
+        if not checked_pos:
+            # Last resort fallback: default to '4'
+            checked_pos = '4'
+            if '4' in self.chk_groups:
+                self.chk_groups['4'].setVisible(True)
+                self.chk_groups['4'].setChecked(True)
+            
+        # Mặc định lấy file 2.png ở desktop
+        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+        src_png = os.path.join(desktop, '2.png')
+        if not os.path.exists(src_png):
+            src_png = os.path.join(desktop, '2.PNG')
+            
+        if not os.path.exists(src_png):
+            self.flash_status("NO 2.PNG ON DESKTOP", "#ff3333")
+            print(f"[IN] 2.png not found on Desktop.")
             return
-
-    def on_open_mini_game(self):
-        """Open the Tài Xỉu LAN mini-game window (prompts for name once if not set yet)"""
+            
+        dxf_name = f"{oid}_({checked_pos}).dxf"
+        dxf_name = dxf_name.replace('/', '-').replace('\\', '-')
+        dxf_path = os.path.join(desktop, dxf_name)
+        
         try:
-            from PySide6.QtWidgets import QDialog
-            from tai_xiu_game import TaiXiuGameWindow, NameInputDialog, load_profile, save_profile
+            self.perform_png_to_dxf(src_png, dxf_path)
             
-            profile = load_profile()
-            current_name = profile.get("username", "").strip()
-            
-            # Show name dialog ONLY if username is empty
-            if not current_name:
-                dlg = NameInputDialog(current_name, self)
-                if dlg.exec() == QDialog.Accepted:
-                    profile["username"] = dlg.username
-                    save_profile(profile)
-                else:
-                    return # User cancelled, do not open the game window
-            
-            # Check and open game window safely (Only allow one instance)
-            still_open = False
-            if hasattr(self, '_game_window') and self._game_window is not None:
+            # Backup to folder if it exists
+            if self.current_folder and os.path.exists(self.current_folder):
+                import shutil
+                backup_path = os.path.join(self.current_folder, dxf_name)
                 try:
-                    if self._game_window.isVisible():
-                        still_open = True
-                except RuntimeError:
-                    self._game_window = None
-            
-            if still_open:
-                try:
-                    self._game_window.close()
-                    self._game_window.deleteLater()
-                except:
-                    pass
-                self._game_window = None
-                self.flash_status("Dong game", "#ff3333")
-                return
-            else:
-                self._game_window = None
-            
-            # Create a fresh single instance
-            self._game_window = TaiXiuGameWindow(parent=self)
-            self._game_window.show()
-            self._game_window.raise_()
-            self._game_window.activateWindow()
+                    shutil.copy2(dxf_path, backup_path)
+                    print(f"[IN] Saved backup DXF to folder: {backup_path}")
+                except Exception as eb:
+                    print(f"[IN] Backup copy error: {eb}")
+                    
+            self.flash_status("DXF EXPORTED", "#00ff41")
+            self.show_success_toast(f"Đã xuất file cắt: {dxf_name}")
+            print(f"[IN] Exported DXF using Desktop 2.png to: {dxf_path}")
         except Exception as e:
-            import traceback
-            err_detail = traceback.format_exc()
-            print(f"Mini game error: {e}\n{err_detail}")
-            # In EXE mode write to log and show dialog so error is visible
-            if getattr(__import__('sys'), 'frozen', False):
-                try:
-                    import os as _os
-                    log_path = _os.path.join(_os.path.dirname(__import__('sys').executable), 'game_error.log')
-                    with open(log_path, 'a', encoding='utf-8') as _f:
-                        _f.write(f'\n--- Mini Game Error ---\n{err_detail}\n')
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(self, 'Game Error', f'Lỗi mở game:\n{e}\n\nXem chi tiết tại: game_error.log')
-                except Exception:
-                    pass
-            self.flash_status("Loi mo game", "#ff3333")
-
-    def on_tool_selected(self, index):
-        """Legacy: kept for backward compatibility — combo selection no longer auto-launches"""
-        pass
+            self.flash_status("CONV ERROR", "#ff3333")
+            print(f"[IN] Conversion error: {e}")
 
     def exit_all_apps(self):
         """Emergency exit: terminates all related tools and python processes, then exits"""
@@ -2073,6 +2250,31 @@ class MiniApp(QMainWindow):
                 self.btn_overlay_title.setStyleSheet("background: transparent; color: #00ff41; font-size: 8px; font-weight: bold; border: none; padding: 0;")
                 self.btn_overlay_title.setToolTip("Disable HUD Overlay")
 
+    def on_show_history(self):
+        dialog = OrderHistoryDialog(self)
+        dialog.exec()
+
+    def on_toggle_mini_widget(self):
+        if not hasattr(self, 'is_mini_widget_mode'):
+            self.is_mini_widget_mode = False
+        
+        if not self.is_mini_widget_mode:
+            self.is_mini_widget_mode = True
+            self.setFixedSize(165, 36)
+            if hasattr(self, 'btn_badge'): self.btn_badge.hide()
+            if hasattr(self, 'btn_mode'): self.btn_mode.hide()
+            if hasattr(self, 'chk_box_container'): self.chk_box_container.hide()
+            if hasattr(self, 'lbl_chu_chay'): self.lbl_chu_chay.setText("MINI WIDGET ⚡")
+            self.flash_status("MINI MODE", "#ff00ff")
+        else:
+            self.is_mini_widget_mode = False
+            self.setFixedSize(165, 192)
+            if hasattr(self, 'btn_badge'): self.btn_badge.show()
+            if hasattr(self, 'btn_mode'): self.btn_mode.show()
+            if hasattr(self, 'chk_box_container'): self.chk_box_container.show()
+            if hasattr(self, 'lbl_chu_chay'): self.lbl_chu_chay.setText("AI LÀ VUA LÌ ĐÒN ⚡ BEYOND ALL BORDERS ⚡")
+            self.flash_status("NORMAL MODE", "#00ff41")
+
     def on_toggle_pin(self):
         flags = self.windowFlags()
         if self.is_pinned:
@@ -2100,11 +2302,116 @@ class MiniApp(QMainWindow):
     def on_toggle_pin_corner(self):
         self.on_toggle_pin()
 
+    def auto_folder_dialog_detector(self):
+        if not HAS_WIN32:
+            return
+            
+        import win32gui
+        import win32con
+        import time
+        import pyperclip
+        import pyautogui
+
+        handled_hwnds = set()
+        
+        while not getattr(self, 'is_closing', False):
+            time.sleep(0.15) # Quick poll rate
+            if not self.current_folder or not os.path.exists(self.current_folder):
+                continue
+
+            # Enum all visible #32770 dialogs
+            def enum_windows_callback(hwnd, extra):
+                if win32gui.GetClassName(hwnd) == "#32770" and win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    extra.append((hwnd, title))
+                return True
+
+            dialogs = []
+            try:
+                win32gui.EnumWindows(enum_windows_callback, dialogs)
+            except Exception:
+                continue
+
+            for hwnd, title in dialogs:
+                if hwnd in handled_hwnds:
+                    continue
+
+                title_lower = title.lower()
+                
+                # Case 1: Select Folder Dialog
+                if "chọn thư mục" in title_lower or "select folder" in title_lower or "tải lên thư mục" in title_lower or "upload folder" in title_lower:
+                    print(f"[DIALOG 1] Found Folder Dialog HWND: {hwnd}, Title: '{title}'")
+                    handled_hwnds.add(hwnd)
+                    try:
+                        folder_path = os.path.abspath(self.current_folder)
+                        pyperclip.copy(folder_path)
+                        
+                        # Bring dialog window to foreground
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.15)
+                        
+                        # Swift path entry: Ctrl+L -> Ctrl+V -> Enter
+                        pyautogui.hotkey('ctrl', 'l')
+                        time.sleep(0.1)
+                        pyautogui.hotkey('ctrl', 'v')
+                        time.sleep(0.1)
+                        pyautogui.press('enter')
+                        time.sleep(0.3) # Wait for navigation inside the folder
+                        
+                        # Submit selection: press Enter again to choose the folder
+                        pyautogui.press('enter')
+                        print(f"[DIALOG 1] Navigation and selection submitted for HWND: {hwnd}")
+                    except Exception as e:
+                        print(f"[DIALOG 1] Error: {e}")
+                        handled_hwnds.discard(hwnd)
+                        
+                # Case 2: Confirmation warning dialog (Tải các tệp lên?, Tải lên?, Upload tệp?, etc.)
+                elif "tải" in title_lower or "upload" in title_lower or "confir" in title_lower or "xác nhận" in title_lower:
+                    print(f"[DIALOG 2] Found Confirmation Dialog HWND: {hwnd}, Title: '{title}'")
+                    handled_hwnds.add(hwnd)
+                    try:
+                        # Bring confirmation dialog to foreground
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.15)
+                        
+                        # Press Enter or Alt+T/Alt+U to confirm upload
+                        pyautogui.press('enter')
+                        time.sleep(0.1)
+                        pyautogui.hotkey('alt', 't')
+                        time.sleep(0.1)
+                        pyautogui.hotkey('alt', 'u')
+                        print(f"[DIALOG 2] Confirmation submitted for HWND: {hwnd}")
+                    except Exception as e:
+                        print(f"[DIALOG 2] Error: {e}")
+                        handled_hwnds.discard(hwnd)
+
     # on_toggle_expand removed per user request for list style UI
 
     @Slot(dict)
     def update_data(self, data):
-        self.current_data = logic.parse_details(data)
+        try:
+            parsed = logic.parse_details(data)
+            oid = parsed.get('order_id', 'Unknown')
+            if not oid or oid == 'Unknown':
+                return
+
+            # Replace the entire queue with this single active order
+            self.order_queue = [parsed]
+            print(f"[QUEUE] Loaded single active order {oid}.")
+            order_db.add_order(parsed)
+            self.show_order(parsed)
+        except Exception as e:
+            # Prevent entire app crash on bad incoming data from browser
+            try:
+                print(f"[GUI] update_data parse error (suppressed): {e}")
+                self.flash_status("PARSE ERR", "#ff5555")
+            except Exception:
+                pass
+
+    def show_order(self, order_data):
+        self.current_data = order_data
         
         oid = self.current_data.get('order_id', 'Unknown')
         f_type = self.current_data.get('file_type', 'UNK')
@@ -2117,21 +2424,19 @@ class MiniApp(QMainWindow):
         self.lbl_id.setText(oid)
         self.lbl_id.scroll_pos = 0  # Reset scroll position
         
-        self.btn_mode.setText(mode if mode else "-")
-        if "DST" in f_type:
-             bg_col = "#440000" 
-             txt_col = "#ff003c"
-             border_col = "#ff003c"
-        elif "TBF" in f_type:
-             bg_col = "#002200" 
-             txt_col = "#00ff41"
-             border_col = "#00ff41"
-             
+        thread_color = self.current_data.get('thread_color', '-')
+        mode_text = mode if mode else "-"
+        if thread_color and thread_color != "-":
+            mode_text += f" ({thread_color})"
+        self.btn_mode.setText(mode_text)
+        
         # Add Dims if available
         dims = self.current_data.get('dims', '')
         badge_text = f"{f_type} | {size}"
         if dims:
             badge_text += f" | {dims}"
+        if thread_color and thread_color != "-":
+            badge_text += f" | {thread_color}"
             
         self.btn_badge.setText(badge_text)
         
@@ -2146,6 +2451,12 @@ class MiniApp(QMainWindow):
             if pos in self.chk_groups:
                 self.chk_groups[pos].setVisible(True)
                 visible_keys.append(pos)
+        
+        # Bỏ chức năng chọn nhiều dữ liệu: Nếu có nhiều hơn 1 vị trí hiển thị, chỉ giữ lại vị trí đầu tiên
+        if len(visible_keys) > 1:
+            for k in visible_keys[1:]:
+                self.chk_groups[k].setVisible(False)
+            visible_keys = [visible_keys[0]]
         
         # Auto-check if only 1 checkbox is visible
         if len(visible_keys) == 1:
@@ -2197,13 +2508,428 @@ class MiniApp(QMainWindow):
                 self.btn_folder.setStyleSheet("QPushButton { background: #153126; border: 1px solid #00ff41; border-radius: 4px; color: #00ff41; font-size: 12px; font-weight: bold; } QPushButton:hover { background: #002200; }")
         
         # Update Overlay Info
-        self.info_overlay.update_info(oid, mode, size, f_type, dims)
+        self.info_overlay.update_info(oid, mode, size, f_type, dims, thread_color)
         
+        # Update the live order details preview window if it is open
+        if hasattr(self, 'preview_window') and self.preview_window is not None:
+            self.preview_window.update_order_data(self.current_data)
+            
         # Auto-Trigger: Run workflow immediately if enabled and data is valid
         if self.auto_trigger_enabled and oid and oid != 'Unknown':
             print(f"[AUTO-TRIGGER] New data detected: {oid} - Triggering workflow...")
             # Small delay to ensure UI updates complete
             QTimer.singleShot(100, self.on_auto_click)
+
+
+
+    def on_download_image_clicked(self, action_type="f11"):
+        """Download image directly to Desktop and run f11.atn or pet.atn in Photoshop"""
+        image_url = self.current_data.get('image_url', '') if hasattr(self, 'current_data') and self.current_data else ''
+        if image_url:
+            import html
+            image_url = html.unescape(image_url)
+            import urllib.request
+            try:
+                # Save to Desktop using the Order ID as the filename
+                desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+                oid = self.current_data.get('order_id', 'Unknown')
+                clean_oid = oid.replace('/', '-').replace('\\', '-').replace(':', '-')
+                download_path = os.path.join(desktop, f"{clean_oid}.png")
+                
+                print(f"[DOWNLOAD] Downloading {image_url} to {download_path}")
+                # Set user agent to avoid HTTP 403 Forbidden from cloud storage
+                opener = urllib.request.build_opener()
+                opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]
+                urllib.request.install_opener(opener)
+                
+                urllib.request.urlretrieve(image_url, download_path)
+                print(f"[DOWNLOAD] Download complete. Running Photoshop ATN action: {action_type}...")
+                
+                # Run ATN action in Photoshop
+                success = self.run_photoshop_processing(download_path, action_type=action_type)
+                
+                if success:
+                    # Backup the downloaded image, 1.png, and 2.png to the folder if it exists
+                    if self.current_folder and os.path.exists(self.current_folder):
+                        import shutil
+                        try:
+                            shutil.copy2(download_path, os.path.join(self.current_folder, f"{clean_oid}.png"))
+                            desktop_img1 = os.path.join(desktop, '1.png')
+                            desktop_img2 = os.path.join(desktop, '2.png')
+                            if os.path.exists(desktop_img1):
+                                shutil.copy2(desktop_img1, os.path.join(self.current_folder, '1.png'))
+                            if os.path.exists(desktop_img2):
+                                shutil.copy2(desktop_img2, os.path.join(self.current_folder, '2.png'))
+                            print(f"[DOWNLOAD] Backed up downloaded files to folder: {self.current_folder}")
+                        except Exception as eb:
+                            print(f"[DOWNLOAD] Backup copy error: {eb}")
+                            
+                    self.flash_status("D-LOAD OK", "#00ff41")
+                    self.show_success_toast(f"Đã tải và chạy action {action_type}.atn thành công!")
+                    return
+                else:
+                    raise Exception("Photoshop action automation failed")
+                    
+            except Exception as e:
+                print(f"[DOWNLOAD] Direct download/process failed: {e}. Falling back to WS trigger.")
+        
+        # Fallback to WS trigger
+        if hasattr(self, 'flask_thread') and self.flask_thread:
+            self.flask_thread.send_to_ws_clients({"action": f"download_{action_type}"})
+            self.flash_status("D-LOAD WS", "#00ffff")
+        else:
+            self.flash_status("NO WS CONN", "#ff3333")
+
+    def run_photoshop_processing(self, image_path, action_type="f11"):
+        """Open image in Photoshop and execute the f11.atn or pet.atn action set."""
+        import win32com.client
+        import time
+        
+        abs_image_path = os.path.abspath(image_path)
+        if action_type == "pet":
+            atn_path = r"c:\Users\Tx\Desktop\vibecoder\ChestEMB\pet.atn"
+            action_set = "pet"
+            action_name = "tif"
+        else:
+            atn_path = r"c:\Users\Tx\Desktop\vibecoder\ChestEMB\f11.atn"
+            action_set = "f11"
+            action_name = "patcher IN copy"
+        
+        print(f"[PHOTOSHOP] Target image: {abs_image_path}")
+        print(f"[PHOTOSHOP] Target ATN: {atn_path} (Set: {action_set}, Action: {action_name})")
+        
+        try:
+            # Connect to Photoshop COM object
+            print("[PHOTOSHOP] Dispatching Photoshop.Application...")
+            ps = win32com.client.Dispatch("Photoshop.Application")
+            
+            # Make Photoshop visible
+            ps.Visible = True
+            
+            # Open the downloaded image in Photoshop
+            print(f"[PHOTOSHOP] Opening document in Photoshop...")
+            doc = ps.Open(abs_image_path)
+            time.sleep(1.5) # Give Photoshop enough time to load the document
+            
+            # Escape path backslashes for JS string literal
+            escaped_atn_path = atn_path.replace("\\", "\\\\")
+            
+            # Prepare Javascript code to play action from the ATN file
+            jsx_code = f"""
+            var actionSet = "{action_set}";
+            var actionName = "{action_name}";
+            var atnFilePath = "{escaped_atn_path}";
+
+            try {{
+                app.doAction(actionName, actionSet);
+            }} catch (e) {{
+                var atnFile = new File(atnFilePath);
+                if (atnFile.exists) {{
+                    app.load(atnFile);
+                    app.doAction(actionName, actionSet);
+                }} else {{
+                    alert("Không tìm thấy file action " + actionSet + ".atn tại: " + atnFilePath);
+                }}
+            }}
+            """
+            
+            print(f"[PHOTOSHOP] Executing ATN script via JavaScript...")
+            ps.DoJavaScript(jsx_code)
+            
+            # Wait a moment for action to finish and save files
+            time.sleep(2.5)
+            
+            # Close the opened document if it is still open
+            try:
+                if ps.Documents.Count > 0:
+                    ps.ActiveDocument.Close(2) # 2 = PsSaveOptions.psDoNotSaveChanges
+            except Exception as e:
+                print(f"[PHOTOSHOP] Note when closing document: {e}")
+                
+            print("[PHOTOSHOP] ATN execution completed.")
+            return True
+            
+        except Exception as ex:
+            import traceback
+            print(f"[PHOTOSHOP] COM Automation error: {ex}")
+            traceback.print_exc()
+            return False
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith('.png'):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+        
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith('.png'):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+        
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                filepath = url.toLocalFile()
+                if filepath.lower().endswith('.png'):
+                    self.handle_png_drop(filepath)
+                    break
+
+    def handle_png_drop(self, png_path):
+        import re
+        # Resolve target directory
+        if self.current_folder and os.path.exists(self.current_folder):
+            target_dir = self.current_folder
+        else:
+            # Fallback to the same folder as the dropped PNG file
+            target_dir = os.path.dirname(png_path)
+            
+        oid = self.current_data.get('order_id', 'Unknown')
+        if not oid or oid == 'Unknown':
+            # Try to parse order ID from the dropped PNG file name
+            base_name = os.path.splitext(os.path.basename(png_path))[0]
+            oid_match = re.search(r'\d[\w\d]*-[\w\d-]+', base_name)
+            if oid_match:
+                oid = oid_match.group(0)
+            else:
+                parts = re.split(r'[_(\s]', base_name)
+                if parts and parts[0]:
+                    oid = parts[0]
+                else:
+                    oid = base_name
+                    
+        checked_pos = ""
+        for key, chk in self.chk_groups.items():
+            if chk.isVisible() and chk.isChecked():
+                checked_pos = key
+                break
+                
+        # If no checkbox is checked, try to guess or use the first visible one
+        if not checked_pos:
+            # Try to extract from the dropped filename
+            filename_lower = os.path.basename(png_path).lower()
+            for key, chk in self.chk_groups.items():
+                if chk.isVisible() and (f"({key})" in filename_lower or f"_{key}" in filename_lower):
+                    checked_pos = key
+                    chk.setChecked(True)
+                    break
+                    
+        if not checked_pos:
+            # Fallback to the first visible checkbox
+            for key, chk in self.chk_groups.items():
+                if chk.isVisible():
+                    checked_pos = key
+                    chk.setChecked(True)
+                    break
+                    
+        if not checked_pos:
+            # Last resort fallback: default to '4'
+            checked_pos = '4'
+            if '4' in self.chk_groups:
+                self.chk_groups['4'].setVisible(True)
+                self.chk_groups['4'].setChecked(True)
+                
+        dxf_name = f"{oid}_({checked_pos}).dxf"
+        dxf_name = dxf_name.replace('/', '-').replace('\\', '-')
+        dxf_path = os.path.join(target_dir, dxf_name)
+        
+        try:
+            self.perform_png_to_dxf(png_path, dxf_path)
+            self.flash_status("DXF EXPORTED", "#00ff41")
+            self.show_success_toast(f"Đã xuất file cắt: {dxf_name}")
+            print(f"[DROP] Exported DXF to: {dxf_path}")
+        except Exception as e:
+            self.flash_status("CONV ERROR", "#ff3333")
+            print(f"[DROP] Conversion error: {e}")
+
+    def parse_target_dims(self):
+        """Parse physical dimensions (width, height) in mm from the current order data"""
+        import re
+        if not hasattr(self, 'current_data') or not self.current_data:
+            return None
+            
+        dims_str = self.current_data.get('dims', '')
+        size_str = self.current_data.get('size', '')
+        
+        # 1. Try dims first (e.g. "80x80mm", "100x80", "40x50cm")
+        if dims_str:
+            m = re.search(r'([\d.]+)\s*[xX]\s*([\d.]+)\s*(mm|cm|inch|in|")?', dims_str)
+            if m:
+                val1 = float(m.group(1))
+                val2 = float(m.group(2))
+                unit = m.group(3)
+                if not unit:
+                    if "cm" in dims_str.lower(): unit = "cm"
+                    elif "inch" in dims_str.lower() or "in" in dims_str.lower() or '"' in dims_str.lower(): unit = "inch"
+                    else: unit = "mm"
+                    
+                if unit.lower() in ["inch", "in", '"']:
+                    val1 *= 25.4
+                    val2 *= 25.4
+                elif unit.lower() == "cm":
+                    val1 *= 10.0
+                
+                # In dimensions string (H x W), val1 is Height, val2 is Width
+                # Return (width, height)
+                return val2, val1
+                
+        # 2. Try size next (e.g. "3.5", "3.5 inches", "8cm")
+        if size_str:
+            m = re.search(r'([\d.]+)\s*(mm|cm|inch|in|")?', size_str)
+            if m:
+                val = float(m.group(1))
+                unit = m.group(2)
+                if not unit:
+                    if "cm" in size_str.lower(): unit = "cm"
+                    elif "inch" in size_str.lower() or "in" in size_str.lower() or '"' in size_str.lower(): unit = "inch"
+                    else:
+                        unit = "inch" if val < 15.0 else "mm"
+                        
+                if unit.lower() in ["inch", "in", '"']:
+                    val_mm = val * 25.4
+                elif unit.lower() == "cm":
+                    val_mm = val * 10.0
+                else:
+                    val_mm = val
+                    
+                # Return width = height = val_mm (square/circle target)
+                return val_mm, val_mm
+                
+        return None
+
+    def perform_png_to_dxf(self, png_path, dxf_path):
+        """Convert PNG outlines to DXF closed polylines (scaled to match physical dimensions in mm)"""
+        import cv2
+        import numpy as np
+        import traceback
+        
+        try:
+            print(f"[CONVERT] Reading PNG: {png_path}")
+            # Unicode-safe read for Windows
+            img_array = np.fromfile(png_path, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
+            
+            if img is None:
+                raise Exception("Cannot read PNG image (imdecode returned None)")
+                
+            print(f"[CONVERT] Image shape: {img.shape}")
+            # Extract binary contour mask
+            has_transparency = False
+            if img.shape[-1] == 4:
+                alpha = img[:, :, 3]
+                # Check if alpha channel actually has transparent/semi-transparent pixels
+                if alpha.min() < 250 and (alpha.max() - alpha.min() > 10):
+                    has_transparency = True
+                    _, thresh = cv2.threshold(alpha, 10, 255, cv2.THRESH_BINARY)
+                    print("[CONVERT] Using alpha channel for transparency")
+            
+            if not has_transparency:
+                print("[CONVERT] Using BGR grayscale thresholding")
+                if img.shape[-1] == 4:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                else:
+                    img_rgb = img
+                    
+                gray = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+                # Detect non-white pixels (the shape)
+                _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+                if np.mean(thresh) > 127:
+                    thresh = cv2.bitwise_not(thresh)
+                    
+            # Find contours
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            print(f"[CONVERT] Found {len(contours)} contours")
+            
+            # 1. Calculate bounding box of all contours in pixels
+            all_pts = []
+            for contour in contours:
+                for pt in contour:
+                    all_pts.append(pt[0])
+            
+            if all_pts:
+                all_pts = np.array(all_pts)
+                min_x, min_y = all_pts.min(axis=0)
+                max_x, max_y = all_pts.max(axis=0)
+                width_px = max_x - min_x
+                height_px = max_y - min_y
+                if width_px == 0: width_px = 1
+                if height_px == 0: height_px = 1
+            else:
+                min_x, min_y = 0, 0
+                max_x, max_y = 1, 1
+                width_px, height_px = 1, 1
+                
+            # 2. Determine physical target size in mm
+            target_dims = self.parse_target_dims()
+            if target_dims:
+                target_w, target_h = target_dims
+                scale_w = target_w / width_px
+                scale_h = target_h / height_px
+                print(f"[CONVERT] Bounding box pixel size: {width_px}x{height_px}. Physical target: {target_w:.2f}mm x {target_h:.2f}mm. Scale factor: W={scale_w:.4f}, H={scale_h:.4f}")
+            else:
+                # Default scale fallback: 1 pixel = 0.1 mm
+                scale_w = 0.1
+                scale_h = 0.1
+                print(f"[CONVERT] Warning: Could not parse physical dimensions. Defaulting to 1 px = 0.1 mm scale.")
+            
+            # Save to DXF format
+            dxf_lines = [
+                "  0", "SECTION",
+                "  2", "HEADER",
+                "  0", "ENDSEC",
+                "  0", "SECTION",
+                "  2", "ENTITIES"
+            ]
+            
+            handle_val = 256
+            for contour in contours:
+                if len(contour) < 2:
+                    continue
+                    
+                dxf_lines.extend([
+                    "  0", "LWPOLYLINE",
+                    "  5", f"{handle_val:X}",
+                    "100", "AcDbEntity",
+                    "  8", "0",
+                    "100", "AcDbPolyline",
+                    " 90", str(len(contour)),
+                    " 70", "1"
+                ])
+                handle_val += 1
+                
+                for pt in contour:
+                    x, y = pt[0]
+                    # Map to positive quadrant and invert Y so top is higher Y
+                    x_scaled = (x - min_x) * scale_w
+                    y_scaled = (max_y - y) * scale_h
+                    dxf_lines.extend([
+                        " 10", f"{x_scaled:.4f}",
+                        " 20", f"{y_scaled:.4f}"
+                    ])
+                    
+            dxf_lines.extend([
+                "  0", "ENDSEC",
+                "  0", "EOF"
+            ])
+            
+            print(f"[CONVERT] Writing DXF: {dxf_path}")
+            # Ensure output folder exists
+            out_dir = os.path.dirname(dxf_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+                
+            with open(dxf_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(dxf_lines) + "\n")
+            print("[CONVERT] DXF written successfully")
+            
+        except Exception as e:
+            print(f"[CONVERT] Error: {e}")
+            traceback.print_exc()
+            raise e
         
         # If in collapsed mode, we might want to temporarily expand or flash?
         # For now, stay in current mode.
@@ -2424,11 +3150,6 @@ class MiniApp(QMainWindow):
             found_hwnd = results[0]
             if getattr(self, 'last_detected_export_hwnd', None) != found_hwnd:
                 self.last_detected_export_hwnd = found_hwnd
-                target_folder = self._ensure_current_folder_for_hotkey()
-                if target_folder:
-                    logic.copy_to_clipboard(target_folder)
-                    self.flash_status("AUTO COPY PO", "#00ffcc")
-                    print(f"[AUTO-COPY] Export window detected ({win32gui.GetWindowText(found_hwnd)}), copied PO path: {target_folder}")
         else:
             self.last_detected_export_hwnd = None
 

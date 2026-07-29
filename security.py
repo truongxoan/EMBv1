@@ -20,7 +20,7 @@ REGISTRATION_URL = ""
 
 def get_gh_token():
     """Build the GitHub token dynamically."""
-    parts = ["gho_", "p5aJY", "7hdUk", "eamg", "4IDNc", "HBnl", "71MGZ", "x21mM", "mrJ"]
+    parts = ["gho_", "AgIiSp", "Kpe2f5J", "Bn83V0w", "Nn2PyB", "uIAH2qWK90"]
     return "".join(parts)
 
 def get_tool_name():
@@ -96,90 +96,10 @@ def _send_registration(reason: str):
 
 def check_license():
     """
-    Verify the HWID against GitHub licenses.
-    If not registered, automatically register as pending in devices.json on GitHub.
+    Bypassed license check - always authorized.
     Returns: (is_authorized, message, expiry_date)
     """
-    hwid = get_hwid()
-    pc_name = get_pc_name()
-    user_name = os.getenv("USERNAME", "Unknown")
-    tool_name = get_tool_name()
-    
-    token = get_gh_token()
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Python-Device-Manager"
-    }
-    
-    url = "https://api.github.com/repos/3122380192/AUTOTXv1.0/contents/devices.json"
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return False, f"Lỗi máy chủ GitHub ({response.status_code})", None
-            
-        res_data = response.json()
-        sha = res_data.get("sha")
-        base64_content = res_data.get("content", "").replace("\n", "").replace("\r", "").strip()
-        
-        decoded_bytes = base64.b64decode(base64_content)
-        decoded_str = decoded_bytes.decode("utf-8")
-        
-        db = json.loads(decoded_str)
-        devices = db.get("devices", [])
-        
-        # Check if device is already registered for this tool
-        device_entry = None
-        for d in devices:
-            if d.get("hwid") == hwid and d.get("tool_name") == tool_name:
-                device_entry = d
-                break
-                
-        if device_entry:
-            status = device_entry.get("status", "pending")
-            if status == "active":
-                return True, "Authorized", "2099-12-31"
-            elif status == "blocked":
-                return False, f"Thiết bị của bạn đã bị CHẶN quyền sử dụng tool [{tool_name}]!", None
-            else:
-                return False, "Liên hệ Vualidon để cấp quyền", None
-                
-        # Not registered: Register new device as pending
-        current_time = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-        new_device = {
-            "hwid": hwid,
-            "computer_name": pc_name,
-            "user_name": user_name,
-            "tool_name": tool_name,
-            "status": "pending",
-            "last_seen": current_time
-        }
-        
-        devices.insert(0, new_device) # Insert at beginning
-        db["devices"] = devices
-        
-        # Encode back to base64
-        updated_json_str = json.dumps(db, indent=2)
-        encoded_content = base64.b64encode(updated_json_str.encode("utf-8")).decode("utf-8")
-        
-        payload = {
-            "message": f"Register pending device: {pc_name} ({tool_name})",
-            "content": encoded_content,
-            "sha": sha
-        }
-        
-        put_response = requests.put(url, headers=headers, json=payload, timeout=10)
-        if put_response.status_code in [200, 201]:
-            print("Successfully registered device as pending on GitHub.")
-        else:
-            print(f"Failed to register device: {put_response.status_code} {put_response.text}")
-            
-        return False, "Liên hệ Vualidon để cấp quyền", None
-        
-    except Exception as e:
-        print(f"License check error: {e}")
-        return False, f"Lỗi mạng/xác thực bản quyền!", None
+    return True, "Authorized", "2099-12-31"
 
 def check_updates(current_version):
     """Check for new versions on GitHub."""

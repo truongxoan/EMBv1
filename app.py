@@ -40,7 +40,6 @@ def main():
     if not server.listen(server_name):
         QLocalServer.removeServer(server_name)
         server.listen(server_name)
-    
     # Check License and Register if needed
     is_auth, msg, expiry = security.check_license()
     if not is_auth:
@@ -48,7 +47,7 @@ def main():
         dialog = LicenseDialog(security.get_hwid(), security.get_pc_name(), msg)
         dialog.exec()
         sys.exit(0)
-        
+
     # Force nickname selection on start of tool
     from tai_xiu_game import load_profile, save_profile, NameInputDialog
     profile = load_profile()
@@ -102,6 +101,7 @@ def main():
     # ── Channel 1: HTTP/WebSocket server (requires local host) ────────────────
     flask_thread = FlaskWorker()
     flask_thread.data_received.connect(window.update_data)
+    window.flask_thread = flask_thread
     flask_thread.start()
 
     # ── Channel 2: Clipboard bridge (hostless — no server needed) ─────────────
@@ -113,13 +113,16 @@ def main():
     sys.exit(app.exec())
 
 def exception_hook(exctype, value, traceback):
+    from datetime import datetime
     import traceback as tb
-    with open("error.log", "a") as f:
-        f.write(f"\n[{datetime.now()}] CRASH REPORT:\n")
-        tb.print_exception(exctype, value, traceback, file=f)
+    try:
+        with open("error.log", "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"\n[{datetime.now()}] CRASH REPORT:\n")
+            tb.print_exception(exctype, value, traceback, file=f)
+    except Exception:
+        pass  # Never let the error logger itself crash
     sys.__excepthook__(exctype, value, traceback)
 
 if __name__ == "__main__":
-    from datetime import datetime
     sys.excepthook = exception_hook
     main()
